@@ -14,6 +14,7 @@ use crate::command_jobs::{
     CommandJobManager, CommandJobSnapshot, CommandJobState, DEFAULT_JOB_TIMEOUT_MS,
     DEFAULT_POLL_WAIT_MS, MAX_JOB_TIMEOUT_MS, MAX_POLL_WAIT_MS,
 };
+use crate::desktop;
 use crate::devtools::DevtoolsBridge;
 use crate::handoff;
 use crate::mascot;
@@ -716,6 +717,7 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                 }),
             );
         }
+        "screenshot" | "mouse_move" | "mouse_click" | "mouse_scroll" | "type_text" | "key_press" => {}
         _ => return None,
     }
 
@@ -798,6 +800,100 @@ fn create_handoff_tool_descriptor() -> Value {
         },
         "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
     })
+}
+
+fn desktop_tool_descriptors(tool_mode: ToolMode) -> Vec<Value> {
+    let mut tools = vec![json!({
+        "name": "screenshot",
+        "title": "Screenshot",
+        "description": "Capture the Windows virtual desktop and return a PNG image directly to the model. Mouse coordinates use the pixel space of the most recent screenshot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_width": { "type": "integer", "minimum": 320, "maximum": 1920 },
+                "max_height": { "type": "integer", "minimum": 240, "maximum": 1080 }
+            }
+        },
+        "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+    })];
+
+    if tool_mode.write_tools_enabled() {
+        tools.extend([
+            json!({
+                "name": "mouse_move",
+                "title": "Move mouse",
+                "description": "Move the Windows mouse using coordinates from the most recent screenshot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "integer", "minimum": 0 },
+                        "y": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["x", "y"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": false }
+            }),
+            json!({
+                "name": "mouse_click",
+                "title": "Click mouse",
+                "description": "Click the Windows mouse using coordinates from the most recent screenshot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "integer", "minimum": 0 },
+                        "y": { "type": "integer", "minimum": 0 },
+                        "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                        "clicks": { "type": "integer", "minimum": 1, "maximum": 3 }
+                    },
+                    "required": ["x", "y"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            }),
+            json!({
+                "name": "mouse_scroll",
+                "title": "Scroll mouse",
+                "description": "Scroll the active Windows window. Positive delta scrolls up; negative delta scrolls down. One wheel notch is 120.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "delta": { "type": "integer", "minimum": -12000, "maximum": 12000 }
+                    },
+                    "required": ["delta"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": false }
+            }),
+            json!({
+                "name": "type_text",
+                "title": "Type text",
+                "description": "Type Unicode text into the focused Windows control using SendInput.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            }),
+            json!({
+                "name": "key_press",
+                "title": "Press key",
+                "description": "Press a Windows key or hotkey using SendInput.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "minLength": 1 },
+                        "modifiers": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["ctrl", "shift", "alt", "win"] },
+                            "maxItems": 4
+                        }
+                    },
+                    "required": ["key"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            })
+        ]);
+    }
+    tools
 }
 
 #[cfg(test)]
@@ -912,6 +1008,8 @@ async fn handle_tools_list_with_show_detail_mode(
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
         }
+
+        tools.extend(desktop_tool_descriptors(tool_mode));
 
         tools.push(catdesk_instruction_tool_descriptor());
         tools.push(json!({
@@ -1131,6 +1229,15 @@ async fn handle_tools_call_with_show_detail_mode(
         // Local computer tools
         } else if mode.computer_enabled() {
             if matches!(
+                tool_name.as_str(),
+                "screenshot" | "mouse_move" | "mouse_click" | "mouse_scroll" | "type_text" | "key_press"
+            ) {
+                if tool_name == "screenshot" || tool_mode.write_tools_enabled() {
+                    handle_desktop_tool(req, &tool_name)
+                } else {
+                    read_only_blocked_response(req, &tool_name)
+                }
+            } else if matches!(
                 tool_name.as_str(),
                 "run_command" | "start_command" | "poll_command" | "cancel_command"
             ) {
@@ -1869,6 +1976,144 @@ fn build_run_command_listing_structured(
         "listLimit": listing.limit,
         "listEntries": listing.entries,
     })
+}
+
+fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    match tool_name {
+        "screenshot" => {
+            let max_width = arguments
+                .get("max_width")
+                .and_then(Value::as_u64)
+                .unwrap_or(1366) as u32;
+            let max_height = arguments
+                .get("max_height")
+                .and_then(Value::as_u64)
+                .unwrap_or(768) as u32;
+            match desktop::capture_screenshot(max_width, max_height) {
+                Ok(shot) => {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&shot.png);
+                    JsonRpcResponse::success(
+                        req.id.clone(),
+                        json!({
+                            "content": [{
+                                "type": "image",
+                                "data": data,
+                                "mimeType": "image/png"
+                            }],
+                            "structuredContent": {
+                                "toolName": "screenshot",
+                                "message": format!(
+                                    "Captured Windows desktop {}x{} (physical {}x{}, origin {},{}). Use screenshot pixel coordinates for mouse tools.",
+                                    shot.plan.model_width,
+                                    shot.plan.model_height,
+                                    shot.plan.physical_width,
+                                    shot.plan.physical_height,
+                                    shot.plan.origin_x,
+                                    shot.plan.origin_y
+                                ),
+                                "success": true
+                            }
+                        }),
+                    )
+                }
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        "mouse_move" | "mouse_click" => {
+            let x = arguments.get("x").and_then(Value::as_i64).unwrap_or(-1) as i32;
+            let y = arguments.get("y").and_then(Value::as_i64).unwrap_or(-1) as i32;
+            if x < 0 || y < 0 {
+                return tool_error_response(req, "x and y must be non-negative integers".into());
+            }
+            let result = if tool_name == "mouse_move" {
+                desktop::mouse_move(x, y)
+            } else {
+                let button = arguments
+                    .get("button")
+                    .and_then(Value::as_str)
+                    .unwrap_or("left");
+                let clicks = arguments
+                    .get("clicks")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1) as u32;
+                desktop::mouse_click(x, y, button, clicks)
+            };
+            match result {
+                Ok((screen_x, screen_y)) => tool_success_response_with_structured(
+                    req,
+                    String::new(),
+                    json!({
+                        "toolName": tool_name,
+                        "message": format!("Mouse action at screenshot ({x},{y}) -> screen ({screen_x},{screen_y})"),
+                        "success": true
+                    }),
+                ),
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        "mouse_scroll" => {
+            let delta = arguments.get("delta").and_then(Value::as_i64).unwrap_or(0) as i32;
+            match desktop::mouse_scroll(delta) {
+                Ok(()) => tool_success_response_with_structured(
+                    req,
+                    String::new(),
+                    json!({
+                        "toolName": tool_name,
+                        "message": format!("Scrolled by {delta}"),
+                        "success": true
+                    }),
+                ),
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        "type_text" => {
+            let Some(text) = arguments.get("text").and_then(Value::as_str) else {
+                return tool_error_response(req, "Missing required parameter: text".into());
+            };
+            match desktop::type_text(text) {
+                Ok(()) => tool_success_response_with_structured(
+                    req,
+                    String::new(),
+                    json!({
+                        "toolName": tool_name,
+                        "message": format!("Typed {} characters", text.chars().count()),
+                        "success": true
+                    }),
+                ),
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        "key_press" => {
+            let Some(key) = arguments.get("key").and_then(Value::as_str) else {
+                return tool_error_response(req, "Missing required parameter: key".into());
+            };
+            let modifiers = arguments
+                .get("modifiers")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            match desktop::key_press(key, &modifiers) {
+                Ok(()) => tool_success_response_with_structured(
+                    req,
+                    String::new(),
+                    json!({
+                        "toolName": tool_name,
+                        "message": format!("Pressed key {key} with modifiers {:?}", modifiers),
+                        "success": true
+                    }),
+                ),
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        _ => tool_error_response(req, format!("Unknown desktop tool: {tool_name}")),
+    }
 }
 
 fn tool_response(
@@ -4410,6 +4655,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn screenshot_tool_returns_png_image_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-screenshot-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(
+            "screenshot",
+            json!({ "max_width": 640, "max_height": 480 }),
+        );
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        let result = response.result.as_ref().expect("missing result");
+        assert!(result.get("isError").is_none());
+        let content = result
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("missing content");
+        assert_eq!(content.len(), 1);
+        let image = &content[0];
+        assert_eq!(image.get("type").and_then(Value::as_str), Some("image"));
+        assert_eq!(
+            image.get("mimeType").and_then(Value::as_str),
+            Some("image/png")
+        );
+        let data = image
+            .get("data")
+            .and_then(Value::as_str)
+            .expect("missing image data");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .expect("decode png");
+        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("success").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
     #[tokio::test]
     async fn multi_tools_list_exposes_run_command_mv_without_move_path_tool() {
         let req = JsonRpcRequest {
@@ -4437,6 +4739,12 @@ mod tests {
                 "start_command",
                 "poll_command",
                 "cancel_command",
+                "screenshot",
+                "mouse_move",
+                "mouse_click",
+                "mouse_scroll",
+                "type_text",
+                "key_press",
                 "catdesk_instruction",
                 "read",
                 "search",
@@ -4796,7 +5104,7 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["catdesk_instruction", "read", "search", "create_handoff"]
+            vec!["screenshot", "catdesk_instruction", "read", "search", "create_handoff"]
         );
     }
 

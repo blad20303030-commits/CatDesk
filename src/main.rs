@@ -3,6 +3,7 @@ mod browser;
 mod change_tracking;
 mod command;
 mod command_jobs;
+mod desktop;
 mod devtools;
 mod handoff;
 #[cfg(target_os = "linux")]
@@ -1579,7 +1580,13 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: SharedState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Draw mode selection screen
+    let autostart = std::env::var("CATDESK_AUTOSTART")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+
+    // Draw mode selection screen unless an existing configuration is being
+    // restarted non-interactively (used by the local ChatGPT connector).
+    if !autostart {
     loop {
         let (current_theme, current_tool_mode, current_ui_language) = {
             let app = state.lock().await;
@@ -1622,8 +1629,14 @@ async fn run_app(
             }
         }
     }
+    } else {
+        state
+            .lock()
+            .await
+            .log("INFO", "Autostart: using persisted CatDesk mode and settings".into());
+    }
 
-    if mode_is_browser_enabled(state.clone()).await {
+    if mode_is_browser_enabled(state.clone()).await && !autostart {
         let continue_run = run_browser_select(terminal, state.clone()).await?;
         if !continue_run {
             return Ok(());
