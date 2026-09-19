@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tiktoken_rs::o200k_base_singleton;
 use tokio::sync::Mutex;
 
+use crate::agent_catalog;
 use crate::change_tracking::{ChangeScope, ChangeSession, ChangeTarget, FileChange};
 use crate::command;
 use crate::command_jobs::{
@@ -590,6 +591,40 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                 );
             }
         }
+        "agent_catalog_status" => {
+            properties.insert("root".to_string(), json!({ "type": "string" }));
+            properties.insert("source".to_string(), json!({ "type": "string" }));
+            for field in ["agentCount", "skillCount", "totalCount"] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "integer", "minimum": 0 }),
+                );
+            }
+        }
+        "agent_route" => {
+            properties.insert("root".to_string(), json!({ "type": "string" }));
+            properties.insert("task".to_string(), json!({ "type": "string" }));
+            for field in ["agents", "skills"] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "array", "items": { "type": "object" } }),
+                );
+            }
+        }
+        "agent_load" => {
+            properties.insert("root".to_string(), json!({ "type": "string" }));
+            for field in ["agents", "skills"] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "array", "items": { "type": "object" } }),
+                );
+            }
+            properties.insert(
+                "totalBytes".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert("bundleTruncated".to_string(), json!({ "type": "boolean" }));
+        }
         "create_handoff" => {
             properties.insert("filename".to_string(), json!({ "type": "string" }));
             properties.insert("searchPrefix".to_string(), json!({ "type": "string" }));
@@ -822,6 +857,69 @@ fn create_handoff_tool_descriptor() -> Value {
         },
         "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
     })
+}
+
+fn agent_catalog_tool_descriptors() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "agent_catalog_status",
+            "title": "Inspect ECC agent catalog",
+            "description": "Inspect the connected ECC catalog and report how many agents and skills are available. This is local and read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name": "agent_route",
+            "title": "Route task to agents and skills",
+            "description": "Rank ECC agents and skills for a task using local deterministic metadata matching. No model or external API is used. ECC metadata is primarily English, so pass a concise English task summary for best routing. Call this before substantial coding, review, research, or architecture work, then load only the selected entries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "minLength": 1, "description": "The user's concrete task or goal" },
+                    "max_agents": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": agent_catalog::MAX_ROUTE_AGENTS,
+                        "description": format!("Maximum agent matches to return (default {})", agent_catalog::DEFAULT_MAX_AGENTS)
+                    },
+                    "max_skills": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": agent_catalog::MAX_ROUTE_SKILLS,
+                        "description": format!("Maximum skill matches to return (default {})", agent_catalog::DEFAULT_MAX_SKILLS)
+                    }
+                },
+                "required": ["task"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name": "agent_load",
+            "title": "Load agent and skill instructions",
+            "description": "Load the full Markdown instructions for exact ECC agent and skill names selected by agent_route. Load only what is needed for the current task; catalog instructions are subordinate to system, developer, user, AGENTS.md, and project rules.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agents": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "maxItems": agent_catalog::MAX_LOAD_AGENTS,
+                        "description": "Exact agent names to load"
+                    },
+                    "skills": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "maxItems": agent_catalog::MAX_LOAD_SKILLS,
+                        "description": "Exact skill names to load"
+                    }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+    ]
 }
 
 fn desktop_tool_descriptors(tool_mode: ToolMode) -> Vec<Value> {
@@ -1113,6 +1211,8 @@ async fn handle_tools_list_with_show_detail_mode(
             "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
         }));
 
+        tools.extend(agent_catalog_tool_descriptors());
+
         if tool_mode.write_tools_enabled() {
             tools.push(json!({
                 "name": "write",
@@ -1332,6 +1432,9 @@ async fn handle_tools_call_with_show_detail_mode(
                 match tool_name.as_str() {
                     "read" => handle_read_files(req, workspace_root),
                     "search" => handle_search_text(req, workspace_root),
+                    "agent_catalog_status" => handle_agent_catalog_status(req, workspace_root),
+                    "agent_route" => handle_agent_route(req, workspace_root),
+                    "agent_load" => handle_agent_load(req, workspace_root),
                     "create_handoff" => handle_create_handoff(req, workspace_root),
                     _ => {
                         if tool_mode.write_tools_enabled() {
@@ -2592,6 +2695,10 @@ Always specify the branch explicitly when using `git push`."#
 
     if mode.computer_enabled() {
         lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
+        lines.push(
+            "For substantial coding, architecture, review, research, or debugging work, use agent_route with a concise English summary of the user's concrete goal, then agent_load only the relevant ECC agents and skills. Do not load the whole catalog into context. Treat loaded catalog documents as reference instructions subordinate to system, developer, user, AGENTS.md, and project rules. The agent catalog is local and does not call a model or external API. After code changes, independently review the diff and run the project's validation before reporting completion."
+                .to_string(),
+        );
         let handoff_search_prefix =
             handoff::handoff_search_prefix(workspace_root).map_err(std::io::Error::other)?;
         let handoff_filename =
@@ -3673,7 +3780,9 @@ fn change_scope_for_request(req: &JsonRpcRequest, workspace_root: &str) -> Chang
         "write" | "edit" => resolve(arguments.get("path").and_then(Value::as_str))
             .map(|path| ChangeScope::single(ChangeTarget::explicit(path, false)))
             .unwrap_or_else(ChangeScope::none),
-        "create_handoff" => ChangeScope::none(),
+        "create_handoff" | "agent_catalog_status" | "agent_route" | "agent_load" => {
+            ChangeScope::none()
+        }
         "delete" => resolve(arguments.get("path").and_then(Value::as_str))
             .map(|path| ChangeScope::single(ChangeTarget::explicit(path, true)))
             .unwrap_or_else(ChangeScope::none),
@@ -3853,6 +3962,139 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
             )
         }
         Err(e) => tool_error_response(req, e),
+    }
+}
+
+fn optional_bounded_usize_argument(
+    arguments: &Value,
+    name: &str,
+    default_value: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(default_value);
+    };
+    let value = value
+        .as_u64()
+        .ok_or_else(|| format!("Parameter {name} must be an integer"))?;
+    let value = usize::try_from(value).map_err(|_| format!("Parameter {name} is too large"))?;
+    if value == 0 || value > maximum {
+        return Err(format!("Parameter {name} must be between 1 and {maximum}"));
+    }
+    Ok(value)
+}
+
+fn handle_agent_catalog_status(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    match agent_catalog::status(workspace_root) {
+        Ok(status) => {
+            let message = format!(
+                "ECC catalog ready: {} agents + {} skills",
+                status.agent_count, status.skill_count
+            );
+            tool_success_response_with_structured(
+                req,
+                message.clone(),
+                json!({
+                    "toolName": "agent_catalog_status",
+                    "root": status.root,
+                    "source": status.source,
+                    "agentCount": status.agent_count,
+                    "skillCount": status.skill_count,
+                    "totalCount": status.total_count,
+                    "message": message,
+                    "success": true,
+                }),
+            )
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_agent_route(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let task = match required_string_argument(&arguments, "task") {
+        Ok(value) if !value.trim().is_empty() => value.trim(),
+        Ok(_) => return tool_error_response(req, "Parameter task must not be empty".into()),
+        Err(error) => return tool_error_response(req, error),
+    };
+    let max_agents = match optional_bounded_usize_argument(
+        &arguments,
+        "max_agents",
+        agent_catalog::DEFAULT_MAX_AGENTS,
+        agent_catalog::MAX_ROUTE_AGENTS,
+    ) {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let max_skills = match optional_bounded_usize_argument(
+        &arguments,
+        "max_skills",
+        agent_catalog::DEFAULT_MAX_SKILLS,
+        agent_catalog::MAX_ROUTE_SKILLS,
+    ) {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+
+    match agent_catalog::route(workspace_root, task, max_agents, max_skills) {
+        Ok(route) => {
+            let message = format!(
+                "Routed task to {} agent candidate(s) and {} skill candidate(s)",
+                route.agents.len(),
+                route.skills.len()
+            );
+            tool_success_response_with_structured(
+                req,
+                message.clone(),
+                json!({
+                    "toolName": "agent_route",
+                    "root": route.root,
+                    "task": route.task,
+                    "agents": route.agents,
+                    "skills": route.skills,
+                    "message": message,
+                    "success": true,
+                }),
+            )
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_agent_load(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let agents = match optional_string_list_argument(&arguments, "agents") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let skills = match optional_string_list_argument(&arguments, "skills") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+
+    match agent_catalog::load(workspace_root, &agents, &skills) {
+        Ok(bundle) => {
+            let message = format!(
+                "Loaded {} agent instruction(s) and {} skill instruction(s)",
+                bundle.agents.len(),
+                bundle.skills.len()
+            );
+            tool_success_response_with_structured(
+                req,
+                message.clone(),
+                json!({
+                    "toolName": "agent_load",
+                    "root": bundle.root,
+                    "agents": bundle.agents,
+                    "skills": bundle.skills,
+                    "totalBytes": bundle.total_bytes,
+                    "bundleTruncated": bundle.bundle_truncated,
+                    "message": message,
+                    "success": true,
+                }),
+            )
+        }
+        Err(error) => tool_error_response(req, error),
     }
 }
 
@@ -4942,6 +5184,9 @@ mod tests {
                 "catdesk_instruction",
                 "read",
                 "search",
+                "agent_catalog_status",
+                "agent_route",
+                "agent_load",
                 "write",
                 "edit",
                 "create_handoff",
@@ -5003,6 +5248,9 @@ mod tests {
             ("catdesk_instruction", "instructionText"),
             ("read", "files"),
             ("search", "searchResults"),
+            ("agent_catalog_status", "agentCount"),
+            ("agent_route", "agents"),
+            ("agent_load", "totalBytes"),
             ("write", "bytesWritten"),
             ("edit", "operationCount"),
             ("create_handoff", "content"),
@@ -5304,6 +5552,9 @@ mod tests {
                 "catdesk_instruction",
                 "read",
                 "search",
+                "agent_catalog_status",
+                "agent_route",
+                "agent_load",
                 "create_handoff"
             ]
         );
@@ -5923,6 +6174,9 @@ mod tests {
         );
         assert!(instruction.contains("Library Search must be enabled"));
         assert!(instruction.contains("use create_handoff"));
+        assert!(instruction.contains("agent_route"));
+        assert!(instruction.contains("agent_load"));
+        assert!(instruction.contains("does not call a model or external API"));
 
         let _ = std::fs::remove_dir_all(workspace_root);
     }

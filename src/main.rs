@@ -1,3 +1,4 @@
+mod agent_catalog;
 mod binagotchy_gen;
 mod browser;
 mod change_tracking;

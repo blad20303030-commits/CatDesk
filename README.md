@@ -59,6 +59,16 @@ ChatGPT Web + CatDesk
 
 We tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time we tried it with GPT-5.4, we were surprised by how well it worked. GPT-5.5 and GPT-5.6 are even smoother, and GPT-5.6 is extremely good at using CatDesk. It's also very fast.
 
+# ECC agent and skill catalog
+
+CatDesk can use a local [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code) catalog as an on-demand library of agent roles and skills without calling a separate model or paid API.
+
+The runtime exposes three read-only MCP tools: agent_catalog_status verifies the catalog and reports counts; agent_route ranks relevant agents and skills using local metadata matching; agent_load loads only the selected Markdown instructions into the current ChatGPT context.
+
+CatDesk intentionally does not inject the whole catalog into every conversation. It selects and loads only what the current task needs, keeping context smaller and allowing the catalog repository to be updated independently.
+
+Catalog discovery checks the CATDESK_ECC_CATALOG environment variable first, then common local locations including a sibling ecc-catalog repository.
+
 # Differences between ChatGPT Chat + CatDesk, Codex, and the API (let's say Plus plan)
 
 |       | ChatGPT Chat + CatDesk                             | Codex                   | OpenAI API           |
