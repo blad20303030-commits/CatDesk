@@ -60,6 +60,7 @@ pub fn router(
     let agents_path_state = format!("{secret_prefix}/agents/path-state");
     let token_stats_layout = format!("{secret_prefix}/layout/token-stats");
     let show_detail_mode = format!("{secret_prefix}/layout/show-detail");
+    let latest_screenshot = format!("{secret_prefix}/screenshot/latest.png");
 
     Router::new()
         .route(&health_path, get(health))
@@ -89,6 +90,7 @@ pub fn router(
             &show_detail_mode,
             post(post_show_detail_mode).options(options_show_detail_mode),
         )
+        .route(&latest_screenshot, get(get_latest_screenshot))
         .route(&mcp_path, post(post_mcp_http))
         .route(&mcp_path, get(get_mcp))
         .route(&mcp_path, delete(delete_mcp))
@@ -771,6 +773,74 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
 }
 
 // ── GET /<slug> — health ───────────────────────────────────
+
+async fn get_latest_screenshot() -> Response<Body> {
+    let Some(home) = std::env::var_os("USERPROFILE") else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap();
+    };
+    let path = std::path::PathBuf::from(home).join("catdesk-last-screenshot.png");
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CACHE_CONTROL, "no-store, max-age=0")
+            .header(
+                header::CONTENT_DISPOSITION,
+                "inline; filename=\"catdesk-screenshot.png\"",
+            )
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CACHE_CONTROL, "no-store, max-age=0")
+            .body(Body::empty())
+            .unwrap(),
+    }
+}
+
+fn attach_screenshot_url(
+    result: &mut Option<Value>,
+    public_base_url: Option<&str>,
+    mcp_path: &str,
+) {
+    let Some(base) = public_base_url.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let Some(secret_prefix) = mcp_path.strip_suffix("/mcp") else {
+        return;
+    };
+    let Some(structured) = result
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .and_then(|result| result.get_mut("structuredContent"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if structured.get("toolName").and_then(Value::as_str) != Some("screenshot") {
+        return;
+    }
+
+    let url = format!(
+        "{base}{secret_prefix}/screenshot/latest.png?ts={}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or(0)
+    );
+    let message = structured
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Captured Windows desktop")
+        .to_string();
+    structured.insert(
+        "message".to_string(),
+        json!(format!("{message} Image URL: {url}")),
+    );
+}
 
 async fn health(State(s): State<ServerState>) -> Json<Value> {
     let app = s.app.lock().await;
@@ -3042,6 +3112,7 @@ async fn post_mcp_inner(
                 mascot_seed,
                 partner_binagotchy_seed.as_deref(),
             );
+            attach_screenshot_url(&mut resp.result, ngrok_url.as_deref(), &mcp_path);
         }
         if let Some(result) = resp.result.as_mut() {
             mcp::decorate_modern_result(&req.method, result);

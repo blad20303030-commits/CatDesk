@@ -717,7 +717,8 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                 }),
             );
         }
-        "screenshot" | "mouse_move" | "mouse_click" | "mouse_scroll" | "type_text" | "key_press" => {}
+        "screenshot" | "mouse_move" | "mouse_click" | "mouse_scroll" | "type_text"
+        | "key_press" => {}
         _ => return None,
     }
 
@@ -1230,7 +1231,12 @@ async fn handle_tools_call_with_show_detail_mode(
         } else if mode.computer_enabled() {
             if matches!(
                 tool_name.as_str(),
-                "screenshot" | "mouse_move" | "mouse_click" | "mouse_scroll" | "type_text" | "key_press"
+                "screenshot"
+                    | "mouse_move"
+                    | "mouse_click"
+                    | "mouse_scroll"
+                    | "type_text"
+                    | "key_press"
             ) {
                 if tool_name == "screenshot" || tool_mode.write_tools_enabled() {
                     handle_desktop_tool(req, &tool_name)
@@ -1978,6 +1984,35 @@ fn build_run_command_listing_structured(
     })
 }
 
+fn compact_screenshot_jpeg_base64(png: &[u8]) -> Option<String> {
+    let image = image::load_from_memory(png).ok()?;
+    let source_width = image.width().max(1);
+    let source_height = image.height().max(1);
+    let target_width = source_width.min(320);
+    let target_height =
+        ((source_height as u64 * target_width as u64) / source_width as u64).max(1) as u32;
+    let resized = if target_width == source_width && target_height == source_height {
+        image
+    } else {
+        image.resize_exact(
+            target_width,
+            target_height,
+            image::imageops::FilterType::Triangle,
+        )
+    };
+    let rgb = resized.to_rgb8();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 20)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ColorType::Rgb8.into(),
+        )
+        .ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(jpeg))
+}
+
 fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     match tool_name {
@@ -1993,6 +2028,28 @@ fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse
             match desktop::capture_screenshot(max_width, max_height) {
                 Ok(shot) => {
                     let data = base64::engine::general_purpose::STANDARD.encode(&shot.png);
+                    let compact_jpeg = compact_screenshot_jpeg_base64(&shot.png);
+                    let message = match compact_jpeg {
+                        Some(jpeg) => format!(
+                            "Captured Windows desktop {}x{} (physical {}x{}, origin {},{}). Use screenshot pixel coordinates for mouse tools. COMPACT_JPEG_BASE64:{}",
+                            shot.plan.model_width,
+                            shot.plan.model_height,
+                            shot.plan.physical_width,
+                            shot.plan.physical_height,
+                            shot.plan.origin_x,
+                            shot.plan.origin_y,
+                            jpeg
+                        ),
+                        None => format!(
+                            "Captured Windows desktop {}x{} (physical {}x{}, origin {},{}). Use screenshot pixel coordinates for mouse tools.",
+                            shot.plan.model_width,
+                            shot.plan.model_height,
+                            shot.plan.physical_width,
+                            shot.plan.physical_height,
+                            shot.plan.origin_x,
+                            shot.plan.origin_y
+                        ),
+                    };
                     JsonRpcResponse::success(
                         req.id.clone(),
                         json!({
@@ -2003,15 +2060,7 @@ fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse
                             }],
                             "structuredContent": {
                                 "toolName": "screenshot",
-                                "message": format!(
-                                    "Captured Windows desktop {}x{} (physical {}x{}, origin {},{}). Use screenshot pixel coordinates for mouse tools.",
-                                    shot.plan.model_width,
-                                    shot.plan.model_height,
-                                    shot.plan.physical_width,
-                                    shot.plan.physical_height,
-                                    shot.plan.origin_x,
-                                    shot.plan.origin_y
-                                ),
+                                "message": message,
                                 "success": true
                             }
                         }),
@@ -2033,10 +2082,7 @@ fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse
                     .get("button")
                     .and_then(Value::as_str)
                     .unwrap_or("left");
-                let clicks = arguments
-                    .get("clicks")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(1) as u32;
+                let clicks = arguments.get("clicks").and_then(Value::as_u64).unwrap_or(1) as u32;
                 desktop::mouse_click(x, y, button, clicks)
             };
             match result {
@@ -4662,10 +4708,7 @@ mod tests {
             std::env::temp_dir().join(format!("catdesk-mcp-screenshot-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();
-        let req = tool_call_request(
-            "screenshot",
-            json!({ "max_width": 640, "max_height": 480 }),
-        );
+        let req = tool_call_request("screenshot", json!({ "max_width": 640, "max_height": 480 }));
 
         let response = handle_tools_call(
             &req,
@@ -4708,6 +4751,19 @@ mod tests {
             structured.get("success").and_then(Value::as_bool),
             Some(true)
         );
+        let message = structured
+            .get("message")
+            .and_then(Value::as_str)
+            .expect("missing screenshot message");
+        let compact = message
+            .split_once("COMPACT_JPEG_BASE64:")
+            .map(|(_, value)| value.split_whitespace().next().unwrap_or_default())
+            .expect("missing compact screenshot payload");
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(compact)
+            .expect("decode compact jpeg");
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        assert!(jpeg.ends_with(&[0xff, 0xd9]));
 
         let _ = std::fs::remove_dir_all(workspace_root);
     }
@@ -5104,7 +5160,13 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["screenshot", "catdesk_instruction", "read", "search", "create_handoff"]
+            vec![
+                "screenshot",
+                "catdesk_instruction",
+                "read",
+                "search",
+                "create_handoff"
+            ]
         );
     }
 

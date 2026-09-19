@@ -27,18 +27,18 @@ pub fn last_screen_plan() -> Option<ScreenPlan> {
 
 #[cfg(windows)]
 pub fn capture_screenshot(max_width: u32, max_height: u32) -> Result<Screenshot, String> {
-    use image::{ColorType, ImageEncoder, RgbaImage, imageops::FilterType};
     use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder, RgbaImage, imageops::FilterType};
     use std::mem::{size_of, zeroed};
     use std::ptr::null_mut;
     use windows_sys::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
-        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits,
-        ReleaseDC, SelectObject, CAPTUREBLT, SRCCOPY,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
+        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
+        SRCCOPY, SelectObject,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
     };
 
     let max_width = max_width.clamp(320, 1920);
@@ -128,12 +128,8 @@ pub fn capture_screenshot(max_width: u32, max_height: u32) -> Result<Screenshot,
             pixel[3] = 255;
         }
 
-        let image = RgbaImage::from_raw(
-            physical_width as u32,
-            physical_height as u32,
-            bgra,
-        )
-        .ok_or_else(|| "Failed to construct screenshot image".to_string())?;
+        let image = RgbaImage::from_raw(physical_width as u32, physical_height as u32, bgra)
+            .ok_or_else(|| "Failed to construct screenshot image".to_string())?;
 
         let scale = f64::min(
             1.0,
@@ -145,13 +141,12 @@ pub fn capture_screenshot(max_width: u32, max_height: u32) -> Result<Screenshot,
         let model_width = ((physical_width as f64 * scale).round() as u32).max(1);
         let model_height = ((physical_height as f64 * scale).round() as u32).max(1);
 
-        let resized = if model_width == physical_width as u32
-            && model_height == physical_height as u32
-        {
-            image
-        } else {
-            image::imageops::resize(&image, model_width, model_height, FilterType::Triangle)
-        };
+        let resized =
+            if model_width == physical_width as u32 && model_height == physical_height as u32 {
+                image
+            } else {
+                image::imageops::resize(&image, model_width, model_height, FilterType::Triangle)
+            };
 
         let mut png = Vec::new();
         PngEncoder::new(&mut png)
@@ -162,6 +157,11 @@ pub fn capture_screenshot(max_width: u32, max_height: u32) -> Result<Screenshot,
                 ColorType::Rgba8.into(),
             )
             .map_err(|error| format!("PNG encode failed: {error}"))?;
+
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            let out = std::path::PathBuf::from(home).join("catdesk-last-screenshot.png");
+            let _ = std::fs::write(out, &png);
+        }
 
         let plan = ScreenPlan {
             origin_x,
@@ -196,7 +196,8 @@ fn map_model_point(x: i32, y: i32) -> Result<(i32, i32), String> {
     let px = plan.origin_x
         + ((x as f64 + 0.5) * plan.physical_width as f64 / plan.model_width as f64).floor() as i32;
     let py = plan.origin_y
-        + ((y as f64 + 0.5) * plan.physical_height as f64 / plan.model_height as f64).floor() as i32;
+        + ((y as f64 + 0.5) * plan.physical_height as f64 / plan.model_height as f64).floor()
+            as i32;
     Ok((px, py))
 }
 
@@ -221,9 +222,8 @@ pub fn mouse_move(_x: i32, _y: i32) -> Result<(i32, i32), String> {
 pub fn mouse_click(x: i32, y: i32, button: &str, clicks: u32) -> Result<(i32, i32), String> {
     use std::mem::{size_of, zeroed};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP, MOUSEINPUT, SendInput,
+        INPUT, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, SendInput,
     };
 
     let (screen_x, screen_y) = mouse_move(x, y)?;
@@ -256,7 +256,11 @@ pub fn mouse_click(x: i32, y: i32, button: &str, clicks: u32) -> Result<(i32, i3
                 time: 0,
                 dwExtraInfo: 0,
             };
-            let sent = SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32);
+            let sent = SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<INPUT>() as i32,
+            );
             if sent != inputs.len() as u32 {
                 return Err("SendInput mouse click failed".into());
             }
@@ -331,7 +335,11 @@ pub fn type_text(text: &str) -> Result<(), String> {
                 time: 0,
                 dwExtraInfo: 0,
             };
-            let sent = SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32);
+            let sent = SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<INPUT>() as i32,
+            );
             if sent != inputs.len() as u32 {
                 return Err("SendInput text failed".into());
             }
@@ -424,8 +432,7 @@ pub fn key_press(key: &str, modifiers: &[String]) -> Result<(), String> {
     let mut modifier_keys = Vec::new();
     for modifier in modifiers {
         modifier_keys.push(
-            virtual_key(modifier)
-                .ok_or_else(|| format!("Unsupported modifier key: {modifier}"))?,
+            virtual_key(modifier).ok_or_else(|| format!("Unsupported modifier key: {modifier}"))?,
         );
     }
     let key_vk = virtual_key(key).ok_or_else(|| format!("Unsupported key: {key}"))?;
