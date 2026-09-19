@@ -17,6 +17,7 @@ mod server;
 mod startup;
 mod state;
 mod theme;
+mod uia;
 mod workspace_tools;
 
 use crossterm::{
@@ -1458,6 +1459,8 @@ fn macos_terminal_profile_enabled() -> std::io::Result<bool> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    desktop::init_dpi_awareness();
+
     // rustls 0.23 refuses to pick a process-level CryptoProvider when more than
     // one provider feature is enabled, and panics on first use. Both end up
     // enabled here through feature unification: ngrok requires aws-lc-rs, while

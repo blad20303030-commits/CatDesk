@@ -717,8 +717,29 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                 }),
             );
         }
-        "screenshot" | "mouse_move" | "mouse_click" | "mouse_scroll" | "type_text"
-        | "key_press" => {}
+        "screenshot" => {
+            for field in [
+                "captureId",
+                "width",
+                "height",
+                "physicalWidth",
+                "physicalHeight",
+            ] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "integer", "minimum": 0 }),
+                );
+            }
+        }
+        "ui_tree" => {
+            properties.insert("windowName".to_string(), json!({ "type": "string" }));
+            properties.insert("tree".to_string(), json!({ "type": "string" }));
+            properties.insert(
+                "elementCount".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+        }
+        "mouse_move" | "mouse_click" | "ui_click" | "mouse_scroll" | "type_text" | "key_press" => {}
         _ => return None,
     }
 
@@ -804,22 +825,52 @@ fn create_handoff_tool_descriptor() -> Value {
 }
 
 fn desktop_tool_descriptors(tool_mode: ToolMode) -> Vec<Value> {
-    let mut tools = vec![json!({
-        "name": "screenshot",
-        "title": "Screenshot",
-        "description": "Capture the Windows virtual desktop and return a PNG image directly to the model. Mouse coordinates use the pixel space of the most recent screenshot.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "max_width": { "type": "integer", "minimum": 320, "maximum": 1920 },
-                "max_height": { "type": "integer", "minimum": 240, "maximum": 1080 }
-            }
-        },
-        "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-    })];
+    let mut tools = vec![
+        json!({
+            "name": "screenshot",
+            "title": "Screenshot",
+            "description": "Capture the Windows virtual desktop and return a PNG image directly to the model. Returns capture_id; pass it to coordinate mouse actions to reject stale-frame clicks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "max_width": { "type": "integer", "minimum": 320, "maximum": 1920 },
+                    "max_height": { "type": "integer", "minimum": 240, "maximum": 1080 }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name": "ui_tree",
+            "title": "Windows UI tree",
+            "description": "Read the foreground window through Windows UI Automation. Returns compact indexed controls and bounds; prefer this over pixel hunting when controls are exposed through UIA.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "max_depth": { "type": "integer", "minimum": 1, "maximum": 12, "default": 5 }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+    ];
 
     if tool_mode.write_tools_enabled() {
         tools.extend([
+            json!({
+                "name": "ui_click",
+                "title": "Click UI element",
+                "description": "Click an indexed Windows UI Automation element from a fresh foreground UI tree. Prefer this over screenshot coordinates when the target appears in ui_tree.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "element_index": { "type": "integer", "minimum": 0 },
+                        "max_depth": { "type": "integer", "minimum": 1, "maximum": 12, "default": 5 },
+                        "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                        "clicks": { "type": "integer", "minimum": 1, "maximum": 3 }
+                    },
+                    "required": ["element_index"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            }),
             json!({
                 "name": "mouse_move",
                 "title": "Move mouse",
@@ -828,7 +879,8 @@ fn desktop_tool_descriptors(tool_mode: ToolMode) -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "x": { "type": "integer", "minimum": 0 },
-                        "y": { "type": "integer", "minimum": 0 }
+                        "y": { "type": "integer", "minimum": 0 },
+                        "capture_id": { "type": "integer", "minimum": 1, "description": "Expected capture ID from screenshot; rejects stale coordinates when provided." }
                     },
                     "required": ["x", "y"]
                 },
@@ -844,7 +896,8 @@ fn desktop_tool_descriptors(tool_mode: ToolMode) -> Vec<Value> {
                         "x": { "type": "integer", "minimum": 0 },
                         "y": { "type": "integer", "minimum": 0 },
                         "button": { "type": "string", "enum": ["left", "right", "middle"] },
-                        "clicks": { "type": "integer", "minimum": 1, "maximum": 3 }
+                        "clicks": { "type": "integer", "minimum": 1, "maximum": 3 },
+                        "capture_id": { "type": "integer", "minimum": 1, "description": "Expected capture ID from screenshot; rejects stale coordinates when provided." }
                     },
                     "required": ["x", "y"]
                 },
@@ -1232,13 +1285,17 @@ async fn handle_tools_call_with_show_detail_mode(
             if matches!(
                 tool_name.as_str(),
                 "screenshot"
+                    | "ui_tree"
+                    | "ui_click"
                     | "mouse_move"
                     | "mouse_click"
                     | "mouse_scroll"
                     | "type_text"
                     | "key_press"
             ) {
-                if tool_name == "screenshot" || tool_mode.write_tools_enabled() {
+                if matches!(tool_name.as_str(), "screenshot" | "ui_tree")
+                    || tool_mode.write_tools_enabled()
+                {
                     handle_desktop_tool(req, &tool_name)
                 } else {
                     read_only_blocked_response(req, &tool_name)
@@ -2061,11 +2118,83 @@ fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse
                             "structuredContent": {
                                 "toolName": "screenshot",
                                 "message": message,
-                                "success": true
+                                "success": true,
+                                "captureId": shot.plan.capture_id,
+                                "width": shot.plan.model_width,
+                                "height": shot.plan.model_height,
+                                "physicalWidth": shot.plan.physical_width,
+                                "physicalHeight": shot.plan.physical_height
                             }
                         }),
                     )
                 }
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        "ui_tree" => {
+            let max_depth = arguments
+                .get("max_depth")
+                .and_then(Value::as_i64)
+                .unwrap_or(5)
+                .clamp(1, 12) as i32;
+            match crate::uia::capture_foreground(max_depth) {
+                Ok(snapshot) => {
+                    let tree = crate::uia::compact_tree(&snapshot);
+                    tool_success_response_with_structured(
+                        req,
+                        String::new(),
+                        json!({
+                            "toolName": tool_name,
+                            "message": format!(
+                                "Captured UI Automation tree for '{}' with {} elements",
+                                snapshot.window_name,
+                                snapshot.elements.len()
+                            ),
+                            "success": true,
+                            "windowName": snapshot.window_name,
+                            "elementCount": snapshot.elements.len(),
+                            "tree": tree
+                        }),
+                    )
+                }
+                Err(error) => tool_error_response(req, error),
+            }
+        }
+        "ui_click" => {
+            let Some(element_index) = arguments.get("element_index").and_then(Value::as_i64) else {
+                return tool_error_response(
+                    req,
+                    "Missing required parameter: element_index".into(),
+                );
+            };
+            let max_depth = arguments
+                .get("max_depth")
+                .and_then(Value::as_i64)
+                .unwrap_or(5)
+                .clamp(1, 12) as i32;
+            let button = arguments
+                .get("button")
+                .and_then(Value::as_str)
+                .unwrap_or("left");
+            let clicks = arguments.get("clicks").and_then(Value::as_u64).unwrap_or(1) as u32;
+            match crate::uia::capture_foreground(max_depth).and_then(|snapshot| {
+                let (screen_x, screen_y, name) =
+                    crate::uia::resolve_element_center(&snapshot, element_index as i32)?;
+                desktop::mouse_click_screen(screen_x, screen_y, button, clicks)
+                    .map(|_| (screen_x, screen_y, name))
+            }) {
+                Ok((screen_x, screen_y, name)) => tool_success_response_with_structured(
+                    req,
+                    String::new(),
+                    json!({
+                        "toolName": tool_name,
+                        "message": format!(
+                            "Clicked UI element #{element_index} '{}' at screen ({screen_x},{screen_y})",
+                            name
+                        ),
+                        "success": true
+                    }),
+                ),
                 Err(error) => tool_error_response(req, error),
             }
         }
@@ -2075,15 +2204,16 @@ fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse
             if x < 0 || y < 0 {
                 return tool_error_response(req, "x and y must be non-negative integers".into());
             }
+            let capture_id = arguments.get("capture_id").and_then(Value::as_u64);
             let result = if tool_name == "mouse_move" {
-                desktop::mouse_move(x, y)
+                desktop::mouse_move_checked(x, y, capture_id)
             } else {
                 let button = arguments
                     .get("button")
                     .and_then(Value::as_str)
                     .unwrap_or("left");
                 let clicks = arguments.get("clicks").and_then(Value::as_u64).unwrap_or(1) as u32;
-                desktop::mouse_click(x, y, button, clicks)
+                desktop::mouse_click_checked(x, y, button, clicks, capture_id)
             };
             match result {
                 Ok((screen_x, screen_y)) => tool_success_response_with_structured(
@@ -4751,6 +4881,12 @@ mod tests {
             structured.get("success").and_then(Value::as_bool),
             Some(true)
         );
+        assert!(
+            structured
+                .get("captureId")
+                .and_then(Value::as_u64)
+                .is_some_and(|value| value > 0)
+        );
         let message = structured
             .get("message")
             .and_then(Value::as_str)
@@ -4796,6 +4932,8 @@ mod tests {
                 "poll_command",
                 "cancel_command",
                 "screenshot",
+                "ui_tree",
+                "ui_click",
                 "mouse_move",
                 "mouse_click",
                 "mouse_scroll",
@@ -5162,6 +5300,7 @@ mod tests {
             names,
             vec![
                 "screenshot",
+                "ui_tree",
                 "catdesk_instruction",
                 "read",
                 "search",

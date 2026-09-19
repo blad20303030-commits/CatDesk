@@ -1,4 +1,7 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenPlan {
@@ -8,6 +11,7 @@ pub struct ScreenPlan {
     pub physical_height: i32,
     pub model_width: u32,
     pub model_height: u32,
+    pub capture_id: u64,
 }
 
 pub struct Screenshot {
@@ -16,6 +20,7 @@ pub struct Screenshot {
 }
 
 static LAST_SCREEN_PLAN: OnceLock<Mutex<Option<ScreenPlan>>> = OnceLock::new();
+static NEXT_CAPTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn screen_plan_slot() -> &'static Mutex<Option<ScreenPlan>> {
     LAST_SCREEN_PLAN.get_or_init(|| Mutex::new(None))
@@ -24,6 +29,19 @@ fn screen_plan_slot() -> &'static Mutex<Option<ScreenPlan>> {
 pub fn last_screen_plan() -> Option<ScreenPlan> {
     screen_plan_slot().lock().ok().and_then(|guard| *guard)
 }
+
+#[cfg(windows)]
+pub fn init_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn init_dpi_awareness() {}
 
 #[cfg(windows)]
 pub fn capture_screenshot(max_width: u32, max_height: u32) -> Result<Screenshot, String> {
@@ -170,6 +188,7 @@ pub fn capture_screenshot(max_width: u32, max_height: u32) -> Result<Screenshot,
             physical_height,
             model_width,
             model_height,
+            capture_id: NEXT_CAPTURE_ID.fetch_add(1, Ordering::Relaxed),
         };
         if let Ok(mut guard) = screen_plan_slot().lock() {
             *guard = Some(plan);
@@ -184,9 +203,21 @@ pub fn capture_screenshot(_max_width: u32, _max_height: u32) -> Result<Screensho
     Err("Desktop computer-use is supported on Windows only".into())
 }
 
-fn map_model_point(x: i32, y: i32) -> Result<(i32, i32), String> {
+fn map_model_point_for_capture(
+    x: i32,
+    y: i32,
+    expected_capture_id: Option<u64>,
+) -> Result<(i32, i32), String> {
     let plan = last_screen_plan()
         .ok_or_else(|| "Call screenshot before using mouse coordinates".to_string())?;
+    if let Some(expected) = expected_capture_id
+        && expected != plan.capture_id
+    {
+        return Err(format!(
+            "Stale screenshot: requested capture #{expected}, current capture is #{}. Take a fresh screenshot before clicking.",
+            plan.capture_id
+        ));
+    }
     if x < 0 || y < 0 || x >= plan.model_width as i32 || y >= plan.model_height as i32 {
         return Err(format!(
             "Point ({x},{y}) is outside last screenshot {}x{}",
@@ -201,11 +232,15 @@ fn map_model_point(x: i32, y: i32) -> Result<(i32, i32), String> {
     Ok((px, py))
 }
 
+#[cfg(test)]
+fn map_model_point(x: i32, y: i32) -> Result<(i32, i32), String> {
+    map_model_point_for_capture(x, y, None)
+}
+
 #[cfg(windows)]
-pub fn mouse_move(x: i32, y: i32) -> Result<(i32, i32), String> {
+pub fn mouse_move_screen(screen_x: i32, screen_y: i32) -> Result<(i32, i32), String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
-    let (screen_x, screen_y) = map_model_point(x, y)?;
     let ok = unsafe { SetCursorPos(screen_x, screen_y) };
     if ok == 0 {
         return Err("SetCursorPos failed".into());
@@ -213,20 +248,55 @@ pub fn mouse_move(x: i32, y: i32) -> Result<(i32, i32), String> {
     Ok((screen_x, screen_y))
 }
 
+#[cfg(windows)]
+pub fn mouse_move_checked(
+    x: i32,
+    y: i32,
+    expected_capture_id: Option<u64>,
+) -> Result<(i32, i32), String> {
+    let (screen_x, screen_y) = map_model_point_for_capture(x, y, expected_capture_id)?;
+    mouse_move_screen(screen_x, screen_y)
+}
+
 #[cfg(not(windows))]
-pub fn mouse_move(_x: i32, _y: i32) -> Result<(i32, i32), String> {
+pub fn mouse_move_screen(_screen_x: i32, _screen_y: i32) -> Result<(i32, i32), String> {
+    Err("Desktop computer-use is supported on Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn mouse_move_checked(
+    _x: i32,
+    _y: i32,
+    _expected_capture_id: Option<u64>,
+) -> Result<(i32, i32), String> {
     Err("Desktop computer-use is supported on Windows only".into())
 }
 
 #[cfg(windows)]
-pub fn mouse_click(x: i32, y: i32, button: &str, clicks: u32) -> Result<(i32, i32), String> {
+pub fn mouse_click_screen(
+    screen_x: i32,
+    screen_y: i32,
+    button: &str,
+    clicks: u32,
+) -> Result<(i32, i32), String> {
     use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
         MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, SendInput,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, WindowFromPoint};
 
-    let (screen_x, screen_y) = mouse_move(x, y)?;
+    unsafe {
+        let hwnd = WindowFromPoint(POINT {
+            x: screen_x,
+            y: screen_y,
+        });
+        if !hwnd.is_null() {
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+    mouse_move_screen(screen_x, screen_y)?;
     let (down, up) = match button {
         "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
         "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
@@ -273,8 +343,36 @@ pub fn mouse_click(x: i32, y: i32, button: &str, clicks: u32) -> Result<(i32, i3
     Ok((screen_x, screen_y))
 }
 
+#[cfg(windows)]
+pub fn mouse_click_checked(
+    x: i32,
+    y: i32,
+    button: &str,
+    clicks: u32,
+    expected_capture_id: Option<u64>,
+) -> Result<(i32, i32), String> {
+    let (screen_x, screen_y) = map_model_point_for_capture(x, y, expected_capture_id)?;
+    mouse_click_screen(screen_x, screen_y, button, clicks)
+}
+
 #[cfg(not(windows))]
-pub fn mouse_click(_x: i32, _y: i32, _button: &str, _clicks: u32) -> Result<(i32, i32), String> {
+pub fn mouse_click_screen(
+    _screen_x: i32,
+    _screen_y: i32,
+    _button: &str,
+    _clicks: u32,
+) -> Result<(i32, i32), String> {
+    Err("Desktop computer-use is supported on Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn mouse_click_checked(
+    _x: i32,
+    _y: i32,
+    _button: &str,
+    _clicks: u32,
+    _expected_capture_id: Option<u64>,
+) -> Result<(i32, i32), String> {
     Err("Desktop computer-use is supported on Windows only".into())
 }
 
@@ -486,10 +584,30 @@ mod tests {
                 physical_height: 1080,
                 model_width: 1366,
                 model_height: 384,
+                capture_id: 1,
             });
         }
         let (x, y) = map_model_point(683, 192).expect("map point");
         assert!(x >= -5 && x <= 5);
         assert!(y >= 539 && y <= 542);
+    }
+
+    #[test]
+    fn rejects_stale_capture_coordinates() {
+        if let Ok(mut guard) = screen_plan_slot().lock() {
+            *guard = Some(ScreenPlan {
+                origin_x: 0,
+                origin_y: 0,
+                physical_width: 1920,
+                physical_height: 1080,
+                model_width: 1280,
+                model_height: 720,
+                capture_id: 42,
+            });
+        }
+        let error = map_model_point_for_capture(100, 100, Some(41))
+            .expect_err("stale capture should be rejected");
+        assert!(error.contains("Stale screenshot"));
+        assert!(map_model_point_for_capture(100, 100, Some(42)).is_ok());
     }
 }
