@@ -594,7 +594,7 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
         "agent_catalog_status" => {
             properties.insert("root".to_string(), json!({ "type": "string" }));
             properties.insert("source".to_string(), json!({ "type": "string" }));
-            for field in ["agentCount", "skillCount", "totalCount"] {
+            for field in ["agentCount", "skillCount", "designCount", "totalCount"] {
                 properties.insert(
                     field.to_string(),
                     json!({ "type": "integer", "minimum": 0 }),
@@ -604,7 +604,7 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
         "agent_route" => {
             properties.insert("root".to_string(), json!({ "type": "string" }));
             properties.insert("task".to_string(), json!({ "type": "string" }));
-            for field in ["agents", "skills"] {
+            for field in ["agents", "skills", "designs"] {
                 properties.insert(
                     field.to_string(),
                     json!({ "type": "array", "items": { "type": "object" } }),
@@ -613,7 +613,7 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
         }
         "agent_load" => {
             properties.insert("root".to_string(), json!({ "type": "string" }));
-            for field in ["agents", "skills"] {
+            for field in ["agents", "skills", "designs"] {
                 properties.insert(
                     field.to_string(),
                     json!({ "type": "array", "items": { "type": "object" } }),
@@ -863,8 +863,8 @@ fn agent_catalog_tool_descriptors() -> Vec<Value> {
     vec![
         json!({
             "name": "agent_catalog_status",
-            "title": "Inspect ECC agent catalog",
-            "description": "Inspect the connected ECC catalog and report how many agents and skills are available. This is local and read-only.",
+            "title": "Inspect ECC catalog",
+            "description": "Inspect the connected ECC catalog and report how many agents, skills, and DESIGN.md references are available. This is local and read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -873,8 +873,8 @@ fn agent_catalog_tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "agent_route",
-            "title": "Route task to agents and skills",
-            "description": "Rank ECC agents and skills for a task using local deterministic metadata matching. No model or external API is used. ECC metadata is primarily English, so pass a concise English task summary for best routing. Call this before substantial coding, review, research, or architecture work, then load only the selected entries.",
+            "title": "Route task to agents, skills, and designs",
+            "description": "Rank ECC agents, skills, and DESIGN.md references for a task using local deterministic metadata matching. No model or external API is used. Catalog metadata is primarily English, so pass a concise English task summary for best routing. For visual or UI work, load only the relevant returned designs alongside the selected agents and skills.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -890,6 +890,12 @@ fn agent_catalog_tool_descriptors() -> Vec<Value> {
                         "minimum": 1,
                         "maximum": agent_catalog::MAX_ROUTE_SKILLS,
                         "description": format!("Maximum skill matches to return (default {})", agent_catalog::DEFAULT_MAX_SKILLS)
+                    },
+                    "max_designs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": agent_catalog::MAX_ROUTE_DESIGNS,
+                        "description": format!("Maximum DESIGN.md matches to return (default {})", agent_catalog::DEFAULT_MAX_DESIGNS)
                     }
                 },
                 "required": ["task"]
@@ -898,8 +904,8 @@ fn agent_catalog_tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "agent_load",
-            "title": "Load agent and skill instructions",
-            "description": "Load the full Markdown instructions for exact ECC agent and skill names selected by agent_route. Load only what is needed for the current task; catalog instructions are subordinate to system, developer, user, AGENTS.md, and project rules.",
+            "title": "Load agent, skill, and design references",
+            "description": "Load full Markdown for exact ECC agent, skill, and DESIGN.md names selected by agent_route. Load only what is needed for the current task; catalog documents are reference material subordinate to system, developer, user, AGENTS.md, and project rules.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -914,6 +920,12 @@ fn agent_catalog_tool_descriptors() -> Vec<Value> {
                         "items": { "type": "string", "minLength": 1 },
                         "maxItems": agent_catalog::MAX_LOAD_SKILLS,
                         "description": "Exact skill names to load"
+                    },
+                    "designs": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "maxItems": agent_catalog::MAX_LOAD_DESIGNS,
+                        "description": "Exact DESIGN.md names to load"
                     }
                 }
             },
@@ -2696,7 +2708,7 @@ Always specify the branch explicitly when using `git push`."#
     if mode.computer_enabled() {
         lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
         lines.push(
-            "For substantial coding, architecture, review, research, or debugging work, use agent_route with a concise English summary of the user's concrete goal, then agent_load only the relevant ECC agents and skills. Do not load the whole catalog into context. Treat loaded catalog documents as reference instructions subordinate to system, developer, user, AGENTS.md, and project rules. The agent catalog is local and does not call a model or external API. After code changes, independently review the diff and run the project's validation before reporting completion."
+            "For substantial coding, architecture, review, research, debugging, or visual/UI work, use agent_route with a concise English summary of the user's concrete goal, then agent_load only the relevant ECC agents, skills, and DESIGN.md references. For visual/UI work, prefer loading one or a few relevant designs instead of the whole design catalog. Treat loaded catalog documents as reference instructions subordinate to system, developer, user, AGENTS.md, and project rules. The catalog is local and does not call a model or external API. After code changes, independently review the diff and run the project's validation before reporting completion."
                 .to_string(),
         );
         let handoff_search_prefix =
@@ -3988,8 +4000,8 @@ fn handle_agent_catalog_status(req: &JsonRpcRequest, workspace_root: &str) -> Js
     match agent_catalog::status(workspace_root) {
         Ok(status) => {
             let message = format!(
-                "ECC catalog ready: {} agents + {} skills",
-                status.agent_count, status.skill_count
+                "ECC catalog ready: {} agents + {} skills + {} designs",
+                status.agent_count, status.skill_count, status.design_count
             );
             tool_success_response_with_structured(
                 req,
@@ -4000,6 +4012,7 @@ fn handle_agent_catalog_status(req: &JsonRpcRequest, workspace_root: &str) -> Js
                     "source": status.source,
                     "agentCount": status.agent_count,
                     "skillCount": status.skill_count,
+                    "designCount": status.design_count,
                     "totalCount": status.total_count,
                     "message": message,
                     "success": true,
@@ -4035,13 +4048,23 @@ fn handle_agent_route(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
         Ok(value) => value,
         Err(error) => return tool_error_response(req, error),
     };
+    let max_designs = match optional_bounded_usize_argument(
+        &arguments,
+        "max_designs",
+        agent_catalog::DEFAULT_MAX_DESIGNS,
+        agent_catalog::MAX_ROUTE_DESIGNS,
+    ) {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
 
-    match agent_catalog::route(workspace_root, task, max_agents, max_skills) {
+    match agent_catalog::route(workspace_root, task, max_agents, max_skills, max_designs) {
         Ok(route) => {
             let message = format!(
-                "Routed task to {} agent candidate(s) and {} skill candidate(s)",
+                "Routed task to {} agent candidate(s), {} skill candidate(s), and {} design candidate(s)",
                 route.agents.len(),
-                route.skills.len()
+                route.skills.len(),
+                route.designs.len()
             );
             tool_success_response_with_structured(
                 req,
@@ -4052,6 +4075,7 @@ fn handle_agent_route(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
                     "task": route.task,
                     "agents": route.agents,
                     "skills": route.skills,
+                    "designs": route.designs,
                     "message": message,
                     "success": true,
                 }),
@@ -4071,13 +4095,18 @@ fn handle_agent_load(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         Ok(value) => value,
         Err(error) => return tool_error_response(req, error),
     };
+    let designs = match optional_string_list_argument(&arguments, "designs") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
 
-    match agent_catalog::load(workspace_root, &agents, &skills) {
+    match agent_catalog::load(workspace_root, &agents, &skills, &designs) {
         Ok(bundle) => {
             let message = format!(
-                "Loaded {} agent instruction(s) and {} skill instruction(s)",
+                "Loaded {} agent instruction(s), {} skill instruction(s), and {} design reference(s)",
                 bundle.agents.len(),
-                bundle.skills.len()
+                bundle.skills.len(),
+                bundle.designs.len()
             );
             tool_success_response_with_structured(
                 req,
@@ -4087,6 +4116,7 @@ fn handle_agent_load(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
                     "root": bundle.root,
                     "agents": bundle.agents,
                     "skills": bundle.skills,
+                    "designs": bundle.designs,
                     "totalBytes": bundle.total_bytes,
                     "bundleTruncated": bundle.bundle_truncated,
                     "message": message,

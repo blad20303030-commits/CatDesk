@@ -6,10 +6,13 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_MAX_AGENTS: usize = 4;
 pub const DEFAULT_MAX_SKILLS: usize = 8;
+pub const DEFAULT_MAX_DESIGNS: usize = 4;
 pub const MAX_ROUTE_AGENTS: usize = 12;
 pub const MAX_ROUTE_SKILLS: usize = 24;
+pub const MAX_ROUTE_DESIGNS: usize = 12;
 pub const MAX_LOAD_AGENTS: usize = 8;
 pub const MAX_LOAD_SKILLS: usize = 24;
+pub const MAX_LOAD_DESIGNS: usize = 8;
 const MAX_SINGLE_ENTRY_BYTES: usize = 160 * 1024;
 const MAX_BUNDLE_BYTES: usize = 640 * 1024;
 
@@ -37,6 +40,7 @@ pub struct CatalogStatus {
     pub source: String,
     pub agent_count: usize,
     pub skill_count: usize,
+    pub design_count: usize,
     pub total_count: usize,
 }
 
@@ -47,6 +51,7 @@ pub struct RouteResult {
     pub task: String,
     pub agents: Vec<RankedEntry>,
     pub skills: Vec<RankedEntry>,
+    pub designs: Vec<RankedEntry>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,6 +71,7 @@ pub struct LoadResult {
     pub root: String,
     pub agents: Vec<LoadedEntry>,
     pub skills: Vec<LoadedEntry>,
+    pub designs: Vec<LoadedEntry>,
     pub total_bytes: usize,
     pub bundle_truncated: bool,
 }
@@ -81,12 +87,14 @@ pub fn status(workspace_root: &str) -> Result<CatalogStatus, String> {
     let entries = scan_catalog(&location.root)?;
     let agent_count = entries.iter().filter(|entry| entry.kind == "agent").count();
     let skill_count = entries.iter().filter(|entry| entry.kind == "skill").count();
+    let design_count = entries.iter().filter(|entry| entry.kind == "design").count();
 
     Ok(CatalogStatus {
         root: location.root.to_string_lossy().into_owned(),
         source: location.source,
         agent_count,
         skill_count,
+        design_count,
         total_count: entries.len(),
     })
 }
@@ -96,6 +104,7 @@ pub fn route(
     task: &str,
     max_agents: usize,
     max_skills: usize,
+    max_designs: usize,
 ) -> Result<RouteResult, String> {
     let task = task.trim();
     if task.is_empty() {
@@ -110,6 +119,7 @@ pub fn route(
         &entries,
         max_agents.clamp(1, MAX_ROUTE_AGENTS),
         max_skills.clamp(1, MAX_ROUTE_SKILLS),
+        max_designs.clamp(1, MAX_ROUTE_DESIGNS),
     ))
 }
 
@@ -117,15 +127,19 @@ pub fn load(
     workspace_root: &str,
     agent_names: &[String],
     skill_names: &[String],
+    design_names: &[String],
 ) -> Result<LoadResult, String> {
-    if agent_names.is_empty() && skill_names.is_empty() {
-        return Err("Provide at least one agent or skill name".into());
+    if agent_names.is_empty() && skill_names.is_empty() && design_names.is_empty() {
+        return Err("Provide at least one agent, skill, or design name".into());
     }
     if agent_names.len() > MAX_LOAD_AGENTS {
         return Err(format!("Too many agents: maximum is {MAX_LOAD_AGENTS}"));
     }
     if skill_names.len() > MAX_LOAD_SKILLS {
         return Err(format!("Too many skills: maximum is {MAX_LOAD_SKILLS}"));
+    }
+    if design_names.len() > MAX_LOAD_DESIGNS {
+        return Err(format!("Too many designs: maximum is {MAX_LOAD_DESIGNS}"));
     }
 
     let location = locate_catalog(workspace_root)?;
@@ -149,11 +163,20 @@ pub fn load(
         &mut total_bytes,
         &mut bundle_truncated,
     )?;
+    let designs = load_kind(
+        &location.root,
+        &entries,
+        "design",
+        design_names,
+        &mut total_bytes,
+        &mut bundle_truncated,
+    )?;
 
     Ok(LoadResult {
         root: location.root.to_string_lossy().into_owned(),
         agents,
         skills,
+        designs,
         total_bytes,
         bundle_truncated,
     })
@@ -250,6 +273,20 @@ fn scan_catalog(root: &Path) -> Result<Vec<CatalogEntry>, String> {
         entries.push(entry_from_file(root, &path, "skill")?);
     }
 
+    let design_roots = [
+        root.join("awesome-design-md").join("design-md"),
+        root.join("designs"),
+    ];
+    let mut design_files = Vec::new();
+    for designs_dir in design_roots {
+        if designs_dir.is_dir() {
+            collect_named_files(&designs_dir, "DESIGN.md", &mut design_files)?;
+        }
+    }
+    for path in design_files {
+        entries.push(entry_from_file(root, &path, "design")?);
+    }
+
     entries.sort_by(|left, right| {
         left.kind
             .cmp(&right.kind)
@@ -259,17 +296,21 @@ fn scan_catalog(root: &Path) -> Result<Vec<CatalogEntry>, String> {
 }
 
 fn collect_skill_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+    collect_named_files(dir, "SKILL.md", output)
+}
+
+fn collect_named_files(dir: &Path, filename: &str, output: &mut Vec<PathBuf>) -> Result<(), String> {
     for item in
         fs::read_dir(dir).map_err(|error| format!("Failed to read {}: {error}", dir.display()))?
     {
-        let item = item.map_err(|error| format!("Failed to read skill entry: {error}"))?;
+        let item = item.map_err(|error| format!("Failed to read catalog entry: {error}"))?;
         let path = item.path();
         if path.is_dir() {
-            collect_skill_files(&path, output)?;
+            collect_named_files(&path, filename, output)?;
         } else if path
             .file_name()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("SKILL.md"))
+            .is_some_and(|value| value.eq_ignore_ascii_case(filename))
         {
             output.push(path);
         }
@@ -282,7 +323,7 @@ fn entry_from_file(root: &Path, path: &Path, kind: &str) -> Result<CatalogEntry,
         .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
     let (frontmatter_name, description) = parse_frontmatter(&content);
 
-    let fallback_name = if kind == "skill" {
+    let fallback_name = if kind == "skill" || kind == "design" {
         path.parent()
             .and_then(Path::file_name)
             .and_then(|value| value.to_str())
@@ -294,6 +335,11 @@ fn entry_from_file(root: &Path, path: &Path, kind: &str) -> Result<CatalogEntry,
             .unwrap_or("unknown")
             .to_string()
     };
+    let name = if kind == "design" {
+        fallback_name
+    } else {
+        frontmatter_name.unwrap_or(fallback_name)
+    };
 
     let relative_path = path
         .strip_prefix(root)
@@ -303,7 +349,7 @@ fn entry_from_file(root: &Path, path: &Path, kind: &str) -> Result<CatalogEntry,
 
     Ok(CatalogEntry {
         kind: kind.into(),
-        name: frontmatter_name.unwrap_or(fallback_name),
+        name,
         description: description.unwrap_or_default(),
         relative_path,
     })
@@ -352,17 +398,21 @@ fn route_entries(
     entries: &[CatalogEntry],
     max_agents: usize,
     max_skills: usize,
+    max_designs: usize,
 ) -> RouteResult {
     let mut agents = rank_kind(entries, "agent", task);
     let mut skills = rank_kind(entries, "skill", task);
+    let mut designs = rank_kind(entries, "design", task);
     agents.truncate(max_agents);
     skills.truncate(max_skills);
+    designs.truncate(max_designs);
 
     RouteResult {
         root: root.to_string_lossy().into_owned(),
         task: task.to_string(),
         agents,
         skills,
+        designs,
     }
 }
 
@@ -527,6 +577,12 @@ mod tests {
         fs::create_dir_all(root.join("agents")).unwrap();
         fs::create_dir_all(root.join("skills").join("testing")).unwrap();
         fs::create_dir_all(root.join("skills").join("accessibility")).unwrap();
+        fs::create_dir_all(
+            root.join("awesome-design-md")
+                .join("design-md")
+                .join("luxury"),
+        )
+        .unwrap();
 
         fs::write(
             root.join("agents").join("code-reviewer.md"),
@@ -548,6 +604,14 @@ mod tests {
             "---\nname: accessibility\ndescription: Audit UI accessibility\n---\nUse WCAG.\n",
         )
         .unwrap();
+        fs::write(
+            root.join("awesome-design-md")
+                .join("design-md")
+                .join("luxury")
+                .join("DESIGN.md"),
+            "---\nversion: alpha\nname: Luxury-design-analysis\ndescription: Premium glossy editorial layout with dark surfaces, product photography, refined typography, and restrained luxury styling\n---\nUse a premium editorial system.\n",
+        )
+        .unwrap();
 
         root
     }
@@ -563,28 +627,44 @@ mod tests {
         if !catalog.join("skills").exists() {
             fs::rename(workspace.join("skills"), catalog.join("skills")).unwrap();
         }
+        if !catalog.join("awesome-design-md").exists() {
+            fs::rename(
+                workspace.join("awesome-design-md"),
+                catalog.join("awesome-design-md"),
+            )
+            .unwrap();
+        }
         let workspace_str = workspace.to_string_lossy().into_owned();
 
         let status = status(&workspace_str).unwrap();
         assert_eq!(status.agent_count, 2);
         assert_eq!(status.skill_count, 2);
+        assert_eq!(status.design_count, 1);
 
-        let routed = route(&workspace_str, "review code security", 2, 2).unwrap();
+        let routed = route(&workspace_str, "review code security", 2, 2, 2).unwrap();
         assert_eq!(
             routed.agents.first().map(|entry| entry.entry.name.as_str()),
             Some("code-reviewer")
         );
 
-        let loaded = load(&workspace_str, &["architect".into()], &["testing".into()]).unwrap();
+        let loaded = load(
+            &workspace_str,
+            &["architect".into()],
+            &["testing".into()],
+            &["luxury".into()],
+        )
+        .unwrap();
         assert_eq!(loaded.agents.len(), 1);
         assert_eq!(loaded.skills.len(), 1);
+        assert_eq!(loaded.designs.len(), 1);
         assert!(loaded.skills[0].content.contains("Test everything."));
+        assert!(loaded.designs[0].content.contains("premium editorial system"));
 
         let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
-    fn scans_agents_and_skills() {
+    fn scans_agents_skills_and_designs() {
         let root = fixture();
         let entries = scan_catalog(&root).unwrap();
 
@@ -596,8 +676,13 @@ mod tests {
             entries.iter().filter(|entry| entry.kind == "skill").count(),
             2
         );
+        assert_eq!(
+            entries.iter().filter(|entry| entry.kind == "design").count(),
+            1
+        );
         assert!(entries.iter().any(|entry| entry.name == "code-reviewer"));
         assert!(entries.iter().any(|entry| entry.name == "testing"));
+        assert!(entries.iter().any(|entry| entry.name == "luxury"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -606,11 +691,27 @@ mod tests {
     fn routes_by_name_and_description_without_a_model() {
         let root = fixture();
         let entries = scan_catalog(&root).unwrap();
-        let routed = route_entries(&root, "review code security", &entries, 2, 2);
+        let routed = route_entries(&root, "review code security", &entries, 2, 2, 2);
 
         assert_eq!(
             routed.agents.first().map(|entry| entry.entry.name.as_str()),
             Some("code-reviewer")
+        );
+
+        let design_routed = route_entries(
+            &root,
+            "premium glossy luxury product photography",
+            &entries,
+            2,
+            2,
+            2,
+        );
+        assert_eq!(
+            design_routed
+                .designs
+                .first()
+                .map(|entry| entry.entry.name.as_str()),
+            Some("luxury")
         );
 
         let _ = fs::remove_dir_all(root);

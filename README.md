@@ -59,15 +59,15 @@ ChatGPT Web + CatDesk
 
 We tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time we tried it with GPT-5.4, we were surprised by how well it worked. GPT-5.5 and GPT-5.6 are even smoother, and GPT-5.6 is extremely good at using CatDesk. It's also very fast.
 
-# ECC agent and skill catalog
+# ECC agent, skill, and design catalog
 
-CatDesk can use a local [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code) catalog as an on-demand library of agent roles and skills without calling a separate model or paid API.
+CatDesk can use a local [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code) catalog as an on-demand library of agent roles and skills without calling a separate model or paid API. The same catalog can also contain the [awesome-design-md](https://github.com/VoltAgent/awesome-design-md) collection under `awesome-design-md/design-md`.
 
-The runtime exposes three read-only MCP tools: agent_catalog_status verifies the catalog and reports counts; agent_route ranks relevant agents and skills using local metadata matching; agent_load loads only the selected Markdown instructions into the current ChatGPT context.
+The runtime exposes three read-only MCP tools: agent_catalog_status verifies the catalog and reports agent, skill, and design counts; agent_route ranks relevant agents, skills, and DESIGN.md references using local metadata matching; agent_load loads only the selected Markdown into the current ChatGPT context.
 
-CatDesk intentionally does not inject the whole catalog into every conversation. It selects and loads only what the current task needs, keeping context smaller and allowing the catalog repository to be updated independently.
+CatDesk intentionally does not inject the whole catalog into every conversation. It selects and loads only what the current task needs, keeping context smaller and allowing the catalog repository to be updated independently. For visual/UI work, the router can return relevant design references and load one or a few of them alongside the selected agents and skills.
 
-Catalog discovery checks the CATDESK_ECC_CATALOG environment variable first, then common local locations including a sibling ecc-catalog repository.
+Catalog discovery checks the CATDESK_ECC_CATALOG environment variable first, then common local locations including a sibling ecc-catalog repository. Existing catalogs with only `agents` and `skills` remain valid; the design layer is optional.
 
 # Differences between ChatGPT Chat + CatDesk, Codex, and the API (let's say Plus plan)
 
