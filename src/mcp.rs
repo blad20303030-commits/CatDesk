@@ -2700,7 +2700,8 @@ If the custom connector disconnects, returns an empty list or `Resource not foun
 Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise.
 You already have the built-in sandbox container environment. However, CatDesk offers another environment called Workspace. When a user asks you to do anything, use Workspace first, since the user expects you to control their computer rather than your sandbox container.
 When writing a git commit message, first run `git log --oneline -n 5` and keep the commit style consistent with recent history.
-Always specify the branch explicitly when using `git push`."#
+Always specify the branch explicitly when using `git push`.
+If one task is already in progress and a second task is independent and safe to isolate, automatically create a separate git worktree and dedicated branch for the second task; reserve and use a free local port for its service or runtime when one is needed. Do not parallelize tasks that touch the same files, branch, mutable data, runtime, deployment target, or otherwise have ordering or conflict risk; serialize those tasks instead."#
         .lines()
         .map(str::to_string)
         .collect();
@@ -5550,6 +5551,12 @@ mod tests {
             None
         );
         assert!(result_text(&response).contains("CatDesk usage instructions"));
+        assert!(
+            result_text(&response)
+                .contains("automatically create a separate git worktree and dedicated branch")
+        );
+        assert!(result_text(&response).contains("reserve and use a free local port"));
+        assert!(result_text(&response).contains("serialize those tasks instead"));
 
         let _ = std::fs::remove_dir_all(workspace_root);
     }
