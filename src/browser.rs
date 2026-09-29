@@ -171,12 +171,83 @@ fn resolve_binary(binary: &str) -> Option<PathBuf> {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    if let Some(candidate) = resolve_windows_application_binary(binary) {
+        return Some(candidate);
+    }
+
     #[cfg(target_os = "macos")]
     if let Some(candidate) = resolve_macos_application_binary(binary) {
         return Some(candidate);
     }
 
     None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_application_binary(binary: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+
+    let mut push_under = |root: &Option<PathBuf>, relative: &str| {
+        if let Some(root) = root {
+            candidates.push(root.join(relative));
+        }
+    };
+
+    match binary {
+        "google-chrome-stable" | "google-chrome" => {
+            push_under(&program_files, "Google\\Chrome\\Application\\chrome.exe");
+            push_under(
+                &program_files_x86,
+                "Google\\Chrome\\Application\\chrome.exe",
+            );
+            push_under(&local_app_data, "Google\\Chrome\\Application\\chrome.exe");
+        }
+        "microsoft-edge-stable" | "microsoft-edge" => {
+            push_under(&program_files, "Microsoft\\Edge\\Application\\msedge.exe");
+            push_under(
+                &program_files_x86,
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            );
+            push_under(&local_app_data, "Microsoft\\Edge\\Application\\msedge.exe");
+        }
+        "brave-browser" => {
+            push_under(
+                &program_files,
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            );
+            push_under(
+                &program_files_x86,
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            );
+            push_under(
+                &local_app_data,
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            );
+        }
+        "vivaldi" => {
+            push_under(&program_files, "Vivaldi\\Application\\vivaldi.exe");
+            push_under(&local_app_data, "Vivaldi\\Application\\vivaldi.exe");
+        }
+        "opera" => {
+            push_under(&program_files, "Opera\\opera.exe");
+            push_under(&local_app_data, "Programs\\Opera\\opera.exe");
+        }
+        "chromium" | "chromium-browser" => {
+            push_under(&program_files, "Chromium\\Application\\chrome.exe");
+            push_under(&local_app_data, "Chromium\\Application\\chrome.exe");
+        }
+        "firefox" => {
+            push_under(&program_files, "Mozilla Firefox\\firefox.exe");
+            push_under(&program_files_x86, "Mozilla Firefox\\firefox.exe");
+        }
+        _ => {}
+    }
+
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 #[cfg(target_os = "macos")]
@@ -344,12 +415,9 @@ fn command_line_starts_with_executable(command_line: &str, executable: &str) -> 
     if command_line == executable {
         return true;
     }
-    command_line
-        .strip_prefix(executable)
-        .is_some_and(|rest| {
-            rest.chars().next().is_some_and(char::is_whitespace)
-                && rest.trim_start().starts_with('-')
-        })
+    command_line.strip_prefix(executable).is_some_and(|rest| {
+        rest.chars().next().is_some_and(char::is_whitespace) && rest.trim_start().starts_with('-')
+    })
 }
 
 fn command_matches_binary(arg: &str, binary: &str) -> bool {

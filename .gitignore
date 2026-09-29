@@ -1,4 +1,7 @@
 /target
 /npm/bin
+/.worktrees/
+/.tmp*
+/.catdesk/
 log.txt
 log_old.txt

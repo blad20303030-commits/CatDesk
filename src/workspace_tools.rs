@@ -243,6 +243,59 @@ fn resolve_target_path(workspace_root: &str, path: &str) -> Result<PathBuf, Stri
     command::resolve_workspace_path(workspace_root, Some(path))
 }
 
+fn resolve_read_path(workspace_root: &str, path: Option<&str>) -> Result<PathBuf, String> {
+    let root = workspace_root_path(workspace_root)?;
+    let Some(path) = path.filter(|value| !value.trim().is_empty() && *value != ".") else {
+        return Ok(root);
+    };
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return command::resolve_workspace_path(workspace_root, Some(path));
+    }
+
+    let canonical = candidate
+        .canonicalize()
+        .map(command::normalize_windows_verbatim_path)
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let workspace_drive = root.components().find_map(|component| match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    Some(letter.to_ascii_uppercase())
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        let candidate_drive = canonical
+            .components()
+            .find_map(|component| match component {
+                Component::Prefix(prefix) => match prefix.kind() {
+                    Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                        Some(letter.to_ascii_uppercase())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            });
+        if workspace_drive.is_some() && workspace_drive == candidate_drive {
+            return Ok(canonical);
+        }
+    }
+
+    if canonical.starts_with(&root) {
+        Ok(canonical)
+    } else {
+        Err(format!(
+            "Read path is outside the allowed computer scope: {}",
+            canonical.display()
+        ))
+    }
+}
+
 /// Planning and the read share this check so an unreadable path fails the same
 /// way from either one, rather than with whatever the open happened to return.
 fn readable_size(target: &Path) -> Result<u64, String> {
@@ -258,7 +311,7 @@ fn readable_size(target: &Path) -> Result<u64, String> {
 
 fn read_file(workspace_root: &str, path: &str, budget: usize) -> Result<ReadFileOutput, String> {
     let root = workspace_root_path(workspace_root)?;
-    let target = resolve_target_path(workspace_root, path)?;
+    let target = resolve_read_path(workspace_root, Some(path))?;
     let size_bytes = readable_size(&target)?;
     let mut file =
         fs::File::open(&target).map_err(|error| format!("{error}: {}", target.display()))?;
@@ -364,7 +417,7 @@ struct PlannedRead {
 }
 
 fn plan_read(workspace_root: &str, path: &str) -> PlannedRead {
-    let resolved = resolve_target_path(workspace_root, path);
+    let resolved = resolve_read_path(workspace_root, Some(path));
     let target = resolved.as_ref().ok().cloned();
     let size_bytes = resolved.and_then(|target| readable_size(&target));
     match size_bytes {
@@ -548,7 +601,7 @@ pub fn list_files_filtered(
     filter: command::FileListingFilter,
 ) -> Result<ListFilesOutput, String> {
     let root = workspace_root_path(workspace_root)?;
-    let start = command::resolve_workspace_path(workspace_root, path)?;
+    let start = resolve_read_path(workspace_root, path)?;
     if !start.exists() {
         return Err(format!("Path not found: {}", start.display()));
     }
@@ -658,7 +711,7 @@ pub fn search_text(
     }
 
     let root = workspace_root_path(workspace_root)?;
-    let start = command::resolve_workspace_path(workspace_root, options.path)?;
+    let start = resolve_read_path(workspace_root, options.path)?;
     if !start.exists() {
         return Err(format!("Path not found: {}", start.display()));
     }
@@ -1539,6 +1592,37 @@ mod tests {
 
     fn test_workspace(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("catdesk-workspace-tools-{name}-{}", Uuid::new_v4()))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn computer_scope_reads_same_drive_but_writes_stay_in_workspace() {
+        let parent = test_workspace("computer-scope-parent");
+        let workspace_root = parent.join("project");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        let shared = parent.join("shared-rules.md");
+        fs::write(&shared, "shared rules\n").expect("write shared");
+
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let shared_str = shared.to_string_lossy().into_owned();
+        let resolved =
+            resolve_read_path(&workspace_root_str, Some(&shared_str)).expect("read path");
+        assert_eq!(
+            resolved,
+            command::normalize_windows_verbatim_path(shared.canonicalize().unwrap())
+        );
+
+        let read =
+            read_files(&workspace_root_str, std::slice::from_ref(&shared_str)).expect("read");
+        assert_eq!(read.files.len(), 1);
+        assert_eq!(read.files[0].text, "shared rules\n");
+
+        let write_error =
+            write_file(&workspace_root_str, &shared_str, "mutated\n", false).unwrap_err();
+        assert!(write_error.contains("escapes workspace root"));
+        assert_eq!(fs::read_to_string(&shared).unwrap(), "shared rules\n");
+
+        let _ = fs::remove_dir_all(parent);
     }
 
     #[test]

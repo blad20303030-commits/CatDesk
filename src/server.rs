@@ -9,10 +9,14 @@ use axum::{
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::command_jobs::CommandJobManager;
@@ -25,6 +29,289 @@ use crate::state::{
 };
 
 const STATELESS_FLOW_ID: &str = "stateless";
+const MCP_PERF_LOG_EVERY: u64 = 25;
+const MCP_PERF_SLOW_US: u64 = 1_000_000;
+const MCP_PERF_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(not(test))]
+const MCP_PERF_LOG_QUEUE: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct McpPerfSample {
+    parse_us: u64,
+    dispatch_us: u64,
+    post_process_us: u64,
+    serialize_us: u64,
+    total_us: u64,
+    request_bytes: u64,
+    response_bytes: u64,
+}
+
+#[derive(Debug)]
+struct McpPerfCounters {
+    count: AtomicU64,
+    parse_us: AtomicU64,
+    dispatch_us: AtomicU64,
+    post_process_us: AtomicU64,
+    serialize_us: AtomicU64,
+    total_us: AtomicU64,
+    request_bytes: AtomicU64,
+    response_bytes: AtomicU64,
+    max_total_us: AtomicU64,
+}
+
+impl McpPerfCounters {
+    const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            parse_us: AtomicU64::new(0),
+            dispatch_us: AtomicU64::new(0),
+            post_process_us: AtomicU64::new(0),
+            serialize_us: AtomicU64::new(0),
+            total_us: AtomicU64::new(0),
+            request_bytes: AtomicU64::new(0),
+            response_bytes: AtomicU64::new(0),
+            max_total_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, sample: McpPerfSample, log_every: u64) -> (u64, Option<String>) {
+        self.parse_us.fetch_add(sample.parse_us, Ordering::Relaxed);
+        self.dispatch_us
+            .fetch_add(sample.dispatch_us, Ordering::Relaxed);
+        self.post_process_us
+            .fetch_add(sample.post_process_us, Ordering::Relaxed);
+        self.serialize_us
+            .fetch_add(sample.serialize_us, Ordering::Relaxed);
+        self.total_us.fetch_add(sample.total_us, Ordering::Relaxed);
+        self.request_bytes
+            .fetch_add(sample.request_bytes, Ordering::Relaxed);
+        self.response_bytes
+            .fetch_add(sample.response_bytes, Ordering::Relaxed);
+        self.max_total_us
+            .fetch_max(sample.total_us, Ordering::Relaxed);
+        let count = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        if log_every == 0 || count % log_every != 0 {
+            return (count, None);
+        }
+
+        let avg = |counter: &AtomicU64| counter.load(Ordering::Relaxed) / count;
+        let summary = format!(
+            "MCP perf samples={count} avg_us total={} parse={} dispatch={} post={} serialize={} max_total_us={} avg_bytes request={} response={}",
+            avg(&self.total_us),
+            avg(&self.parse_us),
+            avg(&self.dispatch_us),
+            avg(&self.post_process_us),
+            avg(&self.serialize_us),
+            self.max_total_us.load(Ordering::Relaxed),
+            avg(&self.request_bytes),
+            avg(&self.response_bytes),
+        );
+        (count, Some(summary))
+    }
+}
+
+static MCP_PERF_ENABLED: OnceLock<bool> = OnceLock::new();
+static MCP_PERF_COUNTERS: McpPerfCounters = McpPerfCounters::new();
+
+fn mcp_perf_enabled() -> bool {
+    *MCP_PERF_ENABLED.get_or_init(|| {
+        std::env::var("CATDESK_MCP_PERF_PROFILE")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+    })
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+fn elapsed_micros(started: Option<Instant>) -> u64 {
+    started
+        .map(|started| duration_micros(started.elapsed()))
+        .unwrap_or(0)
+}
+
+fn mcp_perf_log_path() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .map(|home| home.join(".catdesk").join("perf").join("mcp-perf.jsonl"))
+}
+
+#[derive(Clone, Debug)]
+struct McpPerfLogRecord {
+    path: PathBuf,
+    sample_line: String,
+    aggregate_line: Option<String>,
+}
+
+static MCP_PERF_LOG_DROPPED: AtomicU64 = AtomicU64::new(0);
+static MCP_PERF_LOG_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+fn mcp_perf_dominant_phase(sample: McpPerfSample) -> &'static str {
+    [
+        ("parse", sample.parse_us),
+        ("dispatch", sample.dispatch_us),
+        ("post", sample.post_process_us),
+        ("serialize", sample.serialize_us),
+    ]
+    .into_iter()
+    .max_by_key(|(_, value)| *value)
+    .map(|(name, _)| name)
+    .unwrap_or("dispatch")
+}
+
+fn build_mcp_perf_record(
+    req: &JsonRpcRequest,
+    sample: McpPerfSample,
+    sample_number: u64,
+    summary: Option<&str>,
+) -> std::io::Result<Option<McpPerfLogRecord>> {
+    let Some(path) = mcp_perf_log_path() else {
+        return Ok(None);
+    };
+    let tool = (req.method == "tools/call")
+        .then(|| req.params.get("name").and_then(Value::as_str))
+        .flatten();
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sample_line = serde_json::to_string(&json!({
+        "kind": "sample",
+        "timestamp_ms": timestamp_ms,
+        "pid": std::process::id(),
+        "sample": sample_number,
+        "method": req.method,
+        "tool": tool,
+        "total_us": sample.total_us,
+        "parse_us": sample.parse_us,
+        "dispatch_us": sample.dispatch_us,
+        "post_us": sample.post_process_us,
+        "serialize_us": sample.serialize_us,
+        "request_bytes": sample.request_bytes,
+        "response_bytes": sample.response_bytes,
+        "slow": sample.total_us >= MCP_PERF_SLOW_US,
+        "dominant_phase": mcp_perf_dominant_phase(sample),
+    }))?;
+    let aggregate_line = summary
+        .map(|summary| {
+            serde_json::to_string(&json!({
+                "kind": "aggregate",
+                "timestamp_ms": timestamp_ms,
+                "pid": std::process::id(),
+                "samples": sample_number,
+                "summary": summary,
+                "dropped_log_samples": MCP_PERF_LOG_DROPPED.load(Ordering::Relaxed),
+                "log_write_errors": MCP_PERF_LOG_ERRORS.load(Ordering::Relaxed),
+            }))
+        })
+        .transpose()?;
+    Ok(Some(McpPerfLogRecord {
+        path,
+        sample_line,
+        aggregate_line,
+    }))
+}
+
+fn write_mcp_perf_record(record: &McpPerfLogRecord) -> std::io::Result<()> {
+    if let Some(parent) = record.path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes_to_add = record.sample_line.len() as u64
+        + 1
+        + record
+            .aggregate_line
+            .as_ref()
+            .map(|line| line.len() as u64 + 1)
+            .unwrap_or(0);
+    if record
+        .path
+        .metadata()
+        .is_ok_and(|meta| meta.len().saturating_add(bytes_to_add) > MCP_PERF_LOG_MAX_BYTES)
+    {
+        let backup = record.path.with_extension("jsonl.1");
+        match fs::remove_file(&backup) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(&record.path, backup)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&record.path)?;
+    writeln!(file, "{}", record.sample_line)?;
+    if let Some(line) = &record.aggregate_line {
+        writeln!(file, "{line}")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn enqueue_mcp_perf_record(record: McpPerfLogRecord) -> Result<(), String> {
+    write_mcp_perf_record(&record).map_err(|error| error.to_string())
+}
+
+#[cfg(not(test))]
+fn enqueue_mcp_perf_record(record: McpPerfLogRecord) -> Result<(), String> {
+    use std::sync::mpsc::{SyncSender, sync_channel};
+    static CHANNEL: OnceLock<Option<SyncSender<McpPerfLogRecord>>> = OnceLock::new();
+    let sender = CHANNEL.get_or_init(|| {
+        let (tx, rx) = sync_channel::<McpPerfLogRecord>(MCP_PERF_LOG_QUEUE);
+        match std::thread::Builder::new()
+            .name("catdesk-mcp-perf-writer".into())
+            .spawn(move || {
+                for record in rx {
+                    if write_mcp_perf_record(&record).is_err() {
+                        MCP_PERF_LOG_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }) {
+            Ok(_) => Some(tx),
+            Err(_) => {
+                MCP_PERF_LOG_ERRORS.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    });
+    let Some(sender) = sender else {
+        return Err("MCP perf writer is unavailable".into());
+    };
+    match sender.try_send(record) {
+        Ok(()) => Ok(()),
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            MCP_PERF_LOG_DROPPED.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            MCP_PERF_LOG_ERRORS.fetch_add(1, Ordering::Relaxed);
+            Err("MCP perf writer disconnected".into())
+        }
+    }
+}
+
+fn enqueue_mcp_perf_sample(
+    req: &JsonRpcRequest,
+    sample: McpPerfSample,
+    sample_number: u64,
+    summary: Option<&str>,
+) -> Result<(), String> {
+    let Some(record) =
+        build_mcp_perf_record(req, sample, sample_number, summary).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    enqueue_mcp_perf_record(record)
+}
 
 #[derive(Clone)]
 struct ServerState {
@@ -1372,6 +1659,85 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::{Mutex, mpsc::unbounded_channel};
+
+    #[test]
+    fn mcp_perf_marks_slow_calls_and_dominant_phase_without_arguments() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/call".into(),
+            params: json!({"name":"search","arguments":{"pattern":"PRIVATE_QUERY"}}),
+        };
+        let sample = McpPerfSample {
+            parse_us: 10,
+            dispatch_us: 1_500_000,
+            post_process_us: 20,
+            serialize_us: 30,
+            total_us: 1_500_060,
+            request_bytes: 100,
+            response_bytes: 200,
+        };
+        let record = build_mcp_perf_record(&req, sample, 1, None)
+            .expect("build perf record")
+            .expect("perf path");
+        let value: Value = serde_json::from_str(&record.sample_line).unwrap();
+        assert_eq!(value["slow"], true);
+        assert_eq!(value["dominant_phase"], "dispatch");
+        assert_eq!(value["tool"], "search");
+        assert!(!record.sample_line.contains("PRIVATE_QUERY"));
+    }
+
+    #[test]
+    fn mcp_perf_writer_rotates_bounded_log() {
+        let dir = std::env::temp_dir().join(format!("catdesk-perf-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp-perf.jsonl");
+        fs::write(&path, vec![b'x'; MCP_PERF_LOG_MAX_BYTES as usize]).unwrap();
+        let record = McpPerfLogRecord {
+            path: path.clone(),
+            sample_line: "{}".into(),
+            aggregate_line: None,
+        };
+        write_mcp_perf_record(&record).unwrap();
+        assert!(path.with_extension("jsonl.1").exists());
+        assert!(path.metadata().unwrap().len() < MCP_PERF_LOG_MAX_BYTES);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mcp_perf_counters_emit_compact_aggregate_on_interval() {
+        let counters = McpPerfCounters::new();
+        let first = McpPerfSample {
+            parse_us: 10,
+            dispatch_us: 100,
+            post_process_us: 20,
+            serialize_us: 5,
+            total_us: 150,
+            request_bytes: 1_000,
+            response_bytes: 2_000,
+        };
+        let second = McpPerfSample {
+            parse_us: 30,
+            dispatch_us: 300,
+            post_process_us: 40,
+            serialize_us: 15,
+            total_us: 450,
+            request_bytes: 3_000,
+            response_bytes: 4_000,
+        };
+
+        assert_eq!(counters.record(first, 2), (1, None));
+        assert_eq!(
+            counters.record(second, 2),
+            (
+                2,
+                Some(
+                    "MCP perf samples=2 avg_us total=300 parse=20 dispatch=200 post=30 serialize=10 max_total_us=450 avg_bytes request=2000 response=3000"
+                        .to_string()
+                )
+            )
+        );
+    }
 
     #[test]
     fn tool_flow_label_includes_selected_argument_summary() {
@@ -2938,6 +3304,10 @@ async fn post_mcp_inner(
     headers: &HeaderMap,
     show_detail_mode: Option<ShowDetailMode>,
 ) -> Response<Body> {
+    let perf_enabled = mcp_perf_enabled();
+    let total_started = perf_enabled.then(Instant::now);
+    let request_bytes = body_bytes.len() as u64;
+    let parse_started = perf_enabled.then(Instant::now);
     let body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
@@ -2956,6 +3326,7 @@ async fn post_mcp_inner(
             );
         }
     };
+    let parse_us = elapsed_micros(parse_started);
     if !body.is_object() {
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "ERROR",
@@ -3063,6 +3434,7 @@ async fn post_mcp_inner(
     }
 
     let show_detail_mode = show_detail_mode.unwrap_or(app_show_detail_mode);
+    let dispatch_started = perf_enabled.then(Instant::now);
     let response = mcp::handle_request_with_show_detail_mode(
         &req,
         &workspace_root,
@@ -3077,6 +3449,8 @@ async fn post_mcp_inner(
         show_detail_mode,
     )
     .await;
+    let dispatch_us = elapsed_micros(dispatch_started);
+    let post_process_started = perf_enabled.then(Instant::now);
 
     let mut response_json: Option<Value> = None;
     if let Some(resp) = response {
@@ -3202,7 +3576,36 @@ async fn post_mcp_inner(
     } else {
         StatusCode::OK
     };
+    let post_process_us = elapsed_micros(post_process_started);
+    let serialize_started = perf_enabled.then(Instant::now);
     let response_body = serde_json::to_string(&response_json).unwrap();
+    let serialize_us = elapsed_micros(serialize_started);
+
+    if perf_enabled {
+        let sample = McpPerfSample {
+            parse_us,
+            dispatch_us,
+            post_process_us,
+            serialize_us,
+            total_us: elapsed_micros(total_started),
+            request_bytes,
+            response_bytes: response_body.len() as u64,
+        };
+        let (sample_number, summary) = MCP_PERF_COUNTERS.record(sample, MCP_PERF_LOG_EVERY);
+        if let Err(error) = enqueue_mcp_perf_sample(&req, sample, sample_number, summary.as_deref())
+        {
+            let _ = s.ui_events.send(ServerUiEvent::Log {
+                level: "ERROR",
+                message: format!("Failed to enqueue MCP perf sample: {error}"),
+            });
+        }
+        if let Some(message) = summary {
+            let _ = s.ui_events.send(ServerUiEvent::Log {
+                level: "INFO",
+                message,
+            });
+        }
+    }
 
     Response::builder()
         .status(response_status)

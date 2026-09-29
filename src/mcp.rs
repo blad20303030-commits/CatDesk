@@ -19,6 +19,8 @@ use crate::desktop;
 use crate::devtools::DevtoolsBridge;
 use crate::handoff;
 use crate::mascot;
+use crate::patch_transport;
+use crate::ssh_remote;
 use crate::state::{
     AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, WidgetCornerStyle,
     app_config_path, load_app_config, user_home_dir,
@@ -539,6 +541,9 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
             );
         }
         "search" => {
+            for field in ["searchDiagnostics", "searchScope", "searchBudget"] {
+                properties.insert(field.into(), json!({"type":"object"}));
+            }
             properties.insert("searchPattern".to_string(), json!({ "type": "string" }));
             properties.insert("searchPath".to_string(), json!({ "type": "string" }));
             properties.insert("searchBackend".to_string(), json!({ "type": "string" }));
@@ -590,6 +595,17 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                     json!({ "type": "integer", "minimum": 0 }),
                 );
             }
+        }
+        "patch_begin" | "patch_chunk" | "patch_apply" | "patch_abort" => {
+            properties.insert("id".to_string(), json!({ "type": "string" }));
+            properties.insert("path".to_string(), json!({ "type": "string" }));
+            properties.insert(
+                "sizeBytes".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert("sha256".to_string(), json!({ "type": "string" }));
+            properties.insert("applied".to_string(), json!({ "type": "boolean" }));
+            properties.insert("aborted".to_string(), json!({ "type": "boolean" }));
         }
         "agent_catalog_status" => {
             properties.insert("root".to_string(), json!({ "type": "string" }));
@@ -751,6 +767,37 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                     }
                 }),
             );
+        }
+        "ssh_exec" | "ssh_upload" | "ssh_download" => {
+            for field in [
+                "host",
+                "user",
+                "stdout",
+                "stderr",
+                "command",
+                "localPath",
+                "remotePath",
+            ] {
+                properties.insert(field.to_string(), json!({ "type": "string" }));
+            }
+            for field in ["port", "elapsedMs"] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "integer", "minimum": 0 }),
+                );
+            }
+            properties.insert(
+                "exitCode".to_string(),
+                json!({ "type": ["integer", "null"] }),
+            );
+            for field in [
+                "timedOut",
+                "stdoutTruncated",
+                "stderrTruncated",
+                "recursive",
+            ] {
+                properties.insert(field.to_string(), json!({ "type": "boolean" }));
+            }
         }
         "screenshot" => {
             for field in [
@@ -1171,6 +1218,64 @@ async fn handle_tools_list_with_show_detail_mode(
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
+            tools.push(json!({
+                "name": "ssh_exec",
+                "title": "SSH exec",
+                "description": "Execute a command non-interactively on a remote SSH host using key authentication. Intended for user-authorized server administration without opening a terminal window.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host": { "type": "string", "minLength": 1, "description": "Remote host name or IP address" },
+                        "user": { "type": "string", "minLength": 1, "default": "root", "description": "Remote SSH user" },
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+                        "identity_file": { "type": "string", "description": "Local private-key path. Password authentication is not supported." },
+                        "command": { "type": "string", "minLength": 1, "description": "Remote shell command" },
+                        "timeout": { "type": "integer", "minimum": 1, "maximum": MAX_JOB_TIMEOUT_MS, "default": 120000 }
+                    },
+                    "required": ["host", "command"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "ssh_upload",
+                "title": "SSH upload",
+                "description": "Upload a workspace file or directory to a remote SSH host using SCP and key authentication.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host": { "type": "string", "minLength": 1 },
+                        "user": { "type": "string", "minLength": 1, "default": "root" },
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+                        "identity_file": { "type": "string" },
+                        "local_path": { "type": "string", "minLength": 1 },
+                        "remote_path": { "type": "string", "minLength": 1 },
+                        "recursive": { "type": "boolean", "default": false },
+                        "timeout": { "type": "integer", "minimum": 1, "maximum": MAX_JOB_TIMEOUT_MS, "default": 300000 }
+                    },
+                    "required": ["host", "local_path", "remote_path"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "ssh_download",
+                "title": "SSH download",
+                "description": "Download a remote file or directory into the workspace over SCP using key authentication.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host": { "type": "string", "minLength": 1 },
+                        "user": { "type": "string", "minLength": 1, "default": "root" },
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+                        "identity_file": { "type": "string" },
+                        "remote_path": { "type": "string", "minLength": 1 },
+                        "local_path": { "type": "string", "minLength": 1 },
+                        "recursive": { "type": "boolean", "default": false },
+                        "timeout": { "type": "integer", "minimum": 1, "maximum": MAX_JOB_TIMEOUT_MS, "default": 300000 }
+                    },
+                    "required": ["host", "remote_path", "local_path"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
         }
 
         tools.extend(desktop_tool_descriptors(tool_mode));
@@ -1201,7 +1306,7 @@ async fn handle_tools_list_with_show_detail_mode(
         tools.push(json!({
             "name": "search",
             "title": "Search text",
-            "description": "Search text across files in workspace. Uses rg when available, then grep, then built-in search.",
+            "description": "Streaming read-only search using embedded ignore/regex with a 5s default budget, bounded content bytes and output. Partial results include explicit reasons. Generated/heavy directories are skipped by default; explicit roots remain searchable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1216,7 +1321,12 @@ async fn handle_tools_list_with_show_detail_mode(
                     "max_matches": { "type": "integer", "description": "Max returned matches (1..500, default 100)" },
                     "max_matches_per_file": { "type": "integer", "description": "Max matches per file (1..500)" },
                     "include_hidden": { "type": "boolean", "description": "Include dotfiles and dot-directories" },
-                    "no_ignore": { "type": "boolean", "description": "Do not respect ignore files" }
+                    "no_ignore": { "type": "boolean", "description": "Do not respect ignore files; also disables source-only exclusions" },
+                    "source_only": {"type":"boolean","default":true,"description":"Skip generated child directories by default, such as node_modules/target/dist/.catdesk-worktrees; an explicitly selected root is still searched. Set false only when generated content is required."},
+                    "timeout_ms": {"type":"integer","minimum":1,"maximum":30000,"default":5000},
+                    "max_bytes": {"type":"integer","minimum":1,"maximum":268435456,"default":33554432},
+                    "max_file_bytes": {"type":"integer","minimum":1,"maximum":16777216,"default":2097152},
+                    "max_response_bytes": {"type":"integer","minimum":4096,"maximum":262144,"default":131072,"description":"Budget for structured search result before common UI metadata"}
                 },
                 "required": ["pattern"]
             },
@@ -1281,6 +1391,55 @@ async fn handle_tools_list_with_show_detail_mode(
                         }
                     },
                     "required": ["path", "edits"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "patch_begin",
+                "title": "Begin large patch",
+                "description": "Create a workspace-local patch session for large diffs. Append chunks with patch_chunk, then verify and apply with patch_apply.",
+                "inputSchema": { "type": "object", "properties": {} },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": false }
+            }));
+            tools.push(json!({
+                "name": "patch_chunk",
+                "title": "Append patch chunk",
+                "description": format!("Append one UTF-8 patch chunk to a patch session. Each chunk is capped at {} bytes and must include the exact expected byte offset.", patch_transport::MAX_PATCH_CHUNK_BYTES),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "expected_offset": { "type": "integer", "minimum": 0 },
+                        "data": { "type": "string" }
+                    },
+                    "required": ["id", "expected_offset", "data"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": false }
+            }));
+            tools.push(json!({
+                "name": "patch_apply",
+                "title": "Verify and apply large patch",
+                "description": "Verify final patch size and SHA-256, run git apply --check, then apply the patch to the active workspace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "expected_size": { "type": "integer", "minimum": 0 },
+                        "expected_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+                        "keep_patch": { "type": "boolean" }
+                    },
+                    "required": ["id", "expected_size", "expected_sha256"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "patch_abort",
+                "title": "Abort large patch",
+                "description": "Delete a workspace-local patch session without applying it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
@@ -1440,10 +1599,26 @@ async fn handle_tools_call_with_show_detail_mode(
                 } else {
                     tool_error_response(req, format!("Unknown tool: {tool_name}"))
                 }
+            } else if matches!(
+                tool_name.as_str(),
+                "ssh_exec" | "ssh_upload" | "ssh_download"
+            ) {
+                if tool_mode.run_command_enabled() {
+                    match tool_name.as_str() {
+                        "ssh_exec" => handle_ssh_exec(req).await,
+                        "ssh_upload" => handle_ssh_upload(req, workspace_root).await,
+                        "ssh_download" => handle_ssh_download(req, workspace_root).await,
+                        _ => unreachable!(),
+                    }
+                } else if tool_mode.read_only() {
+                    read_only_blocked_response(req, &tool_name)
+                } else {
+                    tool_error_response(req, format!("Unknown tool: {tool_name}"))
+                }
             } else {
                 match tool_name.as_str() {
                     "read" => handle_read_files(req, workspace_root),
-                    "search" => handle_search_text(req, workspace_root),
+                    "search" => handle_search_text(req, workspace_root).await,
                     "agent_catalog_status" => handle_agent_catalog_status(req, workspace_root),
                     "agent_route" => handle_agent_route(req, workspace_root),
                     "agent_load" => handle_agent_load(req, workspace_root),
@@ -1453,6 +1628,10 @@ async fn handle_tools_call_with_show_detail_mode(
                             match tool_name.as_str() {
                                 "write" => handle_write_file(req, workspace_root),
                                 "edit" => handle_edit_file(req, workspace_root),
+                                "patch_begin" => handle_patch_begin(req, workspace_root),
+                                "patch_chunk" => handle_patch_chunk(req, workspace_root),
+                                "patch_apply" => handle_patch_apply(req, workspace_root),
+                                "patch_abort" => handle_patch_abort(req, workspace_root),
                                 "delete" => handle_delete_path(req, workspace_root),
                                 _ => {
                                     if mode.browser_enabled() {
@@ -1551,9 +1730,13 @@ async fn forward_to_devtools(
     let Some(bridge) = devtools else {
         return tool_error_response(req, format!("Unknown tool: {tool_name}"));
     };
-
+    let _user_call = DevtoolsBridge::begin_user_call(bridge).await;
+    let browser_started = std::time::Instant::now();
+    let metadata_started = std::time::Instant::now();
+    let devtools_read_only = devtools_tool_is_read_only(bridge, tool_name).await;
+    let metadata_ms = metadata_started.elapsed().as_secs_f64() * 1000.0;
     if tool_mode.read_only() {
-        match devtools_tool_is_read_only(bridge, tool_name).await {
+        match devtools_read_only {
             Some(true) => {}
             Some(false) => return read_only_blocked_response(req, tool_name),
             None => {
@@ -1574,11 +1757,45 @@ async fn forward_to_devtools(
         "params": params
     });
 
-    let mut b = bridge.lock().await;
-    match b.request(&forward_req).await {
+    let scheduler_started = std::time::Instant::now();
+    let mutation_lock = if devtools_read_only == Some(true) {
+        None
+    } else {
+        let page_key = params
+            .get("arguments")
+            .and_then(Value::as_object)
+            .and_then(|arguments| arguments.get("pageId").or_else(|| arguments.get("page_id")))
+            .map(|value| format!("page:{value}"))
+            .unwrap_or_else(|| "__global__".to_string());
+        Some(DevtoolsBridge::mutation_lock(bridge, &page_key).await)
+    };
+    let _mutation_guard = match mutation_lock.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    let scheduler_wait_ms = scheduler_started.elapsed().as_secs_f64() * 1000.0;
+    let request_started = std::time::Instant::now();
+    let request_timeout = DevtoolsBridge::user_tool_timeout(tool_name);
+
+    match DevtoolsBridge::request_user_tool(bridge, &forward_req, tool_name).await {
         Ok(resp) => {
+            let request_ms = request_started.elapsed().as_secs_f64() * 1000.0;
             if let Some(result) = resp.get("result") {
-                return JsonRpcResponse::success(req.id.clone(), result.clone());
+                let mut result = result.clone();
+                if let Some(object) = result.as_object_mut() {
+                    let meta = object.entry("_meta").or_insert_with(|| json!({}));
+                    if !meta.is_object() {
+                        *meta = json!({});
+                    }
+                    meta["catdesk/browserTiming"] = json!({
+                        "metadataMs": metadata_ms,
+                        "schedulerWaitMs": scheduler_wait_ms,
+                        "requestMs": request_ms,
+                        "totalMs": browser_started.elapsed().as_secs_f64() * 1000.0,
+                        "measurement": "CatDesk browser bridge only; excludes ChatGPT/ngrok RTT and remote page work cannot be separated from DevTools requestMs"
+                    });
+                }
+                return JsonRpcResponse::success(req.id.clone(), result);
             }
             if let Some(error) = resp.get("error") {
                 let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
@@ -1593,7 +1810,21 @@ async fn forward_to_devtools(
             }
             tool_error_response(req, "DevTools bridge returned empty response".into())
         }
-        Err(e) => tool_error_response(req, format!("DevTools bridge error: {e}")),
+        Err(e) => {
+            let request_ms = request_started.elapsed().as_secs_f64() * 1000.0;
+            if e.starts_with("Request timed out") {
+                tool_error_response(
+                    req,
+                    format!(
+                        "code: BROWSER_TOOL_TIMEOUT\nmessage: DevTools tool '{tool_name}' exceeded the bounded CatDesk wait; the call is not replayed automatically\ntimeoutMs: {}\nrequestMs: {:.1}\nretrySafe: false",
+                        request_timeout.as_millis(),
+                        request_ms
+                    ),
+                )
+            } else {
+                tool_error_response(req, format!("DevTools bridge error: {e}"))
+            }
+        }
     }
 }
 
@@ -1833,6 +2064,239 @@ async fn handle_cancel_command(
         }
         Err(error) => tool_error_response(req, error),
     }
+}
+
+fn expand_ssh_identity_path(value: &str) -> Result<PathBuf, String> {
+    if value == "~" {
+        return user_home_dir()
+            .map_err(|error| format!("Failed to resolve home directory: {error}"));
+    }
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        return user_home_dir()
+            .map(|home| home.join(rest))
+            .map_err(|error| format!("Failed to resolve home directory: {error}"));
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn ssh_target_from_arguments(arguments: &Value) -> Result<ssh_remote::SshTarget, String> {
+    let host = arguments
+        .get("host")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required parameter: host".to_string())?
+        .to_string();
+    let user = arguments
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or("root")
+        .to_string();
+    let port = arguments.get("port").and_then(Value::as_u64).unwrap_or(22);
+    if !(1..=u16::MAX as u64).contains(&port) {
+        return Err("port must be between 1 and 65535".into());
+    }
+    let identity_file = arguments
+        .get("identity_file")
+        .and_then(Value::as_str)
+        .map(expand_ssh_identity_path)
+        .transpose()?;
+
+    Ok(ssh_remote::SshTarget {
+        host,
+        user,
+        port: port as u16,
+        identity_file,
+    })
+}
+
+fn ssh_timeout(arguments: &Value, default_ms: u64) -> Result<u64, String> {
+    let value = arguments
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(default_ms);
+    if value == 0 || value > MAX_JOB_TIMEOUT_MS {
+        return Err(format!(
+            "timeout must be between 1 and {MAX_JOB_TIMEOUT_MS} ms"
+        ));
+    }
+    Ok(value)
+}
+
+fn ssh_result_text(result: &ssh_remote::SshRunResult) -> String {
+    let mut text = String::new();
+    if !result.stdout.is_empty() {
+        text.push_str(&result.stdout);
+    }
+    if !result.stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&result.stderr);
+    }
+    if text.is_empty() {
+        if result.success {
+            "SSH operation completed successfully".into()
+        } else {
+            "SSH operation failed".into()
+        }
+    } else {
+        text
+    }
+}
+
+fn ssh_structured(
+    tool_name: &str,
+    target: &ssh_remote::SshTarget,
+    result: &ssh_remote::SshRunResult,
+) -> Value {
+    json!({
+        "toolName": tool_name,
+        "host": target.host,
+        "user": target.user,
+        "port": target.port,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "success": result.success,
+        "exitCode": result.exit_code,
+        "elapsedMs": result.elapsed_ms,
+        "timedOut": result.timed_out,
+        "stdoutTruncated": result.stdout_truncated,
+        "stderrTruncated": result.stderr_truncated,
+    })
+}
+
+async fn handle_ssh_exec(req: &JsonRpcRequest) -> JsonRpcResponse {
+    let arguments = req
+        .params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let target = match ssh_target_from_arguments(&arguments) {
+        Ok(target) => target,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let command = match arguments.get("command").and_then(Value::as_str) {
+        Some(command) if !command.trim().is_empty() => command,
+        _ => return tool_error_response(req, "Missing required parameter: command".into()),
+    };
+    let timeout_ms = match ssh_timeout(&arguments, 120_000) {
+        Ok(timeout_ms) => timeout_ms,
+        Err(error) => return tool_error_response(req, error),
+    };
+
+    let result = ssh_remote::exec(&target, command, timeout_ms).await;
+    let text = ssh_result_text(&result);
+    let mut structured = ssh_structured("ssh_exec", &target, &result);
+    if let Some(object) = structured.as_object_mut() {
+        object.insert("command".into(), json!(command));
+    }
+
+    tool_success_response_with_structured(req, text, structured)
+}
+
+async fn handle_ssh_upload(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = req
+        .params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let target = match ssh_target_from_arguments(&arguments) {
+        Ok(target) => target,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let local_path_input = match arguments.get("local_path").and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => path,
+        _ => return tool_error_response(req, "Missing required parameter: local_path".into()),
+    };
+    let local_path = match command::resolve_workspace_path(workspace_root, Some(local_path_input)) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let remote_path = match arguments.get("remote_path").and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => path,
+        _ => return tool_error_response(req, "Missing required parameter: remote_path".into()),
+    };
+    let recursive = arguments
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let timeout_ms = match ssh_timeout(&arguments, 300_000) {
+        Ok(timeout_ms) => timeout_ms,
+        Err(error) => return tool_error_response(req, error),
+    };
+
+    let result = ssh_remote::upload(&target, &local_path, remote_path, recursive, timeout_ms).await;
+    let text = ssh_result_text(&result);
+    let mut structured = ssh_structured("ssh_upload", &target, &result);
+    if let Some(object) = structured.as_object_mut() {
+        object.insert(
+            "localPath".into(),
+            json!(local_path.to_string_lossy().to_string()),
+        );
+        object.insert("remotePath".into(), json!(remote_path));
+        object.insert("recursive".into(), json!(recursive));
+    }
+
+    tool_success_response_with_structured(req, text, structured)
+}
+
+async fn handle_ssh_download(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = req
+        .params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let target = match ssh_target_from_arguments(&arguments) {
+        Ok(target) => target,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let remote_path = match arguments.get("remote_path").and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => path,
+        _ => return tool_error_response(req, "Missing required parameter: remote_path".into()),
+    };
+    let local_path_input = match arguments.get("local_path").and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => path,
+        _ => return tool_error_response(req, "Missing required parameter: local_path".into()),
+    };
+    let local_path = match command::resolve_workspace_path(workspace_root, Some(local_path_input)) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let recursive = arguments
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let timeout_ms = match ssh_timeout(&arguments, 300_000) {
+        Ok(timeout_ms) => timeout_ms,
+        Err(error) => return tool_error_response(req, error),
+    };
+
+    let result =
+        ssh_remote::download(&target, remote_path, &local_path, recursive, timeout_ms).await;
+    let text = ssh_result_text(&result);
+    let mut structured = ssh_structured("ssh_download", &target, &result);
+    if let Some(object) = structured.as_object_mut() {
+        object.insert("remotePath".into(), json!(remote_path));
+        object.insert(
+            "localPath".into(),
+            json!(local_path.to_string_lossy().to_string()),
+        );
+        object.insert("recursive".into(), json!(recursive));
+    }
+
+    tool_success_response_with_structured(req, text, structured)
 }
 
 async fn handle_run_command(
@@ -3793,9 +4257,16 @@ fn change_scope_for_request(req: &JsonRpcRequest, workspace_root: &str) -> Chang
         "write" | "edit" => resolve(arguments.get("path").and_then(Value::as_str))
             .map(|path| ChangeScope::single(ChangeTarget::explicit(path, false)))
             .unwrap_or_else(ChangeScope::none),
-        "create_handoff" | "agent_catalog_status" | "agent_route" | "agent_load" => {
-            ChangeScope::none()
-        }
+        "create_handoff"
+        | "agent_catalog_status"
+        | "agent_route"
+        | "agent_load"
+        | "patch_begin"
+        | "patch_chunk"
+        | "patch_abort" => ChangeScope::none(),
+        "patch_apply" => resolve(Some("."))
+            .map(|path| ChangeScope::single(ChangeTarget::explicit(path, true)))
+            .unwrap_or_else(ChangeScope::none),
         "delete" => resolve(arguments.get("path").and_then(Value::as_str))
             .map(|path| ChangeScope::single(ChangeTarget::explicit(path, true)))
             .unwrap_or_else(ChangeScope::none),
@@ -3844,8 +4315,15 @@ fn is_local_destructive_tool(tool_name: &str) -> bool {
             | "start_command"
             | "poll_command"
             | "cancel_command"
+            | "ssh_exec"
+            | "ssh_upload"
+            | "ssh_download"
             | "write"
             | "edit"
+            | "patch_begin"
+            | "patch_chunk"
+            | "patch_apply"
+            | "patch_abort"
             | "delete"
     )
 }
@@ -3858,20 +4336,7 @@ fn tool_is_read_only(tool: &Value) -> bool {
 }
 
 async fn fetch_devtools_tools(bridge: &Arc<Mutex<DevtoolsBridge>>) -> Option<Vec<Value>> {
-    let list_req = json!({
-        "jsonrpc": "2.0",
-        "id": "dt-tools-list",
-        "method": "tools/list",
-        "params": {}
-    });
-    let mut b = bridge.lock().await;
-    let resp = b.request(&list_req).await.ok()?;
-    let dt_tools = resp
-        .get("result")
-        .and_then(|r| r.get("tools"))
-        .and_then(Value::as_array)?
-        .to_vec();
-    Some(dt_tools)
+    DevtoolsBridge::tools(bridge).await.ok()
 }
 
 async fn devtools_tool_is_read_only(
@@ -3975,6 +4440,126 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
             )
         }
         Err(e) => tool_error_response(req, e),
+    }
+}
+
+fn patch_string_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+    arguments
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Missing required parameter: {name}"))
+}
+
+fn handle_patch_begin(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    match patch_transport::begin(workspace_root) {
+        Ok(session) => tool_success_response_with_structured(
+            req,
+            format!("patch session {} created", session.id),
+            json!({
+                "toolName": "patch_begin",
+                "id": session.id,
+                "path": session.path.to_string_lossy(),
+                "sizeBytes": session.size_bytes,
+            }),
+        ),
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_patch_chunk(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let id = match patch_string_argument(&arguments, "id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let data = match arguments.get("data").and_then(Value::as_str) {
+        Some(value) => value,
+        None => return tool_error_response(req, "Missing required parameter: data".into()),
+    };
+    let expected_offset = match arguments.get("expected_offset").and_then(Value::as_u64) {
+        Some(value) => value,
+        None => {
+            return tool_error_response(req, "Missing required parameter: expected_offset".into());
+        }
+    };
+    match patch_transport::append_chunk(workspace_root, id, expected_offset, data) {
+        Ok(session) => tool_success_response_with_structured(
+            req,
+            format!("patch {} now has {} bytes", session.id, session.size_bytes),
+            json!({
+                "toolName": "patch_chunk",
+                "id": session.id,
+                "path": session.path.to_string_lossy(),
+                "sizeBytes": session.size_bytes,
+            }),
+        ),
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_patch_apply(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let id = match patch_string_argument(&arguments, "id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let expected_sha256 = match patch_string_argument(&arguments, "expected_sha256") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let expected_size = match arguments.get("expected_size").and_then(Value::as_u64) {
+        Some(value) => value,
+        None => {
+            return tool_error_response(req, "Missing required parameter: expected_size".into());
+        }
+    };
+    let keep_patch = arguments
+        .get("keep_patch")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match patch_transport::apply(
+        workspace_root,
+        id,
+        expected_size,
+        expected_sha256,
+        keep_patch,
+    ) {
+        Ok(result) => tool_success_response_with_structured(
+            req,
+            format!("patch {} applied ({} bytes)", result.id, result.size_bytes),
+            json!({
+                "toolName": "patch_apply",
+                "id": result.id,
+                "path": result.path,
+                "sizeBytes": result.size_bytes,
+                "sha256": result.sha256,
+                "applied": true,
+                "checkStdout": result.check_stdout,
+                "applyStdout": result.apply_stdout,
+            }),
+        ),
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_patch_abort(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let id = match patch_string_argument(&arguments, "id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    match patch_transport::abort(workspace_root, id) {
+        Ok(()) => tool_success_response_with_structured(
+            req,
+            format!("patch session {id} aborted"),
+            json!({
+                "toolName": "patch_abort",
+                "id": id,
+                "aborted": true,
+            }),
+        ),
+        Err(error) => tool_error_response(req, error),
     }
 }
 
@@ -4320,89 +4905,61 @@ fn handle_edit_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
     }
 }
 
-fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+async fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
-    let pattern = match required_string_argument(&arguments, "pattern") {
+    if let Err(error) = required_string_argument(&arguments, "pattern") {
+        return tool_error_response(req, error);
+    }
+    for field in ["path", "glob"] {
+        if let Err(error) = optional_string_argument(&arguments, field) {
+            return tool_error_response(req, error);
+        }
+    }
+    for field in [
+        "fixed_strings",
+        "case_insensitive",
+        "include_hidden",
+        "no_ignore",
+        "source_only",
+    ] {
+        if arguments.get(field).is_some()
+            && optional_bool_argument(&arguments, field, false).is_err()
+        {
+            return tool_error_response(req, format!("Parameter {field} must be a boolean"));
+        }
+    }
+    for field in [
+        "context",
+        "before",
+        "after",
+        "max_matches",
+        "max_matches_per_file",
+        "timeout_ms",
+        "max_bytes",
+        "max_file_bytes",
+        "max_response_bytes",
+    ] {
+        if let Some(value) = arguments.get(field) {
+            if value.as_u64().is_none() {
+                return tool_error_response(
+                    req,
+                    format!("Parameter {field} must be a non-negative integer"),
+                );
+            }
+        }
+    }
+    let request = match serde_json::from_value::<crate::bounded_search::Request>(arguments) {
         Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: INVALID_SEARCH_ARGUMENTS\nmessage: {error}"),
+            );
+        }
     };
-    let path = match optional_string_argument(&arguments, "path") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let glob = match optional_string_argument(&arguments, "glob") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let fixed_strings = match optional_bool_argument(&arguments, "fixed_strings", false) {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let case_insensitive = match optional_bool_argument(&arguments, "case_insensitive", false) {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let context = match optional_usize_argument(&arguments, "context") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let before = match optional_usize_argument(&arguments, "before") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let after = match optional_usize_argument(&arguments, "after") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let max_matches = match optional_usize_argument(&arguments, "max_matches") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let max_matches_per_file = match optional_usize_argument(&arguments, "max_matches_per_file") {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let include_hidden = match optional_bool_argument(&arguments, "include_hidden", false) {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    let no_ignore = match optional_bool_argument(&arguments, "no_ignore", false) {
-        Ok(value) => value,
-        Err(e) => return tool_error_response(req, e),
-    };
-    match workspace_tools::search_text(
-        workspace_root,
-        workspace_tools::SearchTextOptions {
-            pattern,
-            path,
-            glob,
-            fixed_strings,
-            case_insensitive,
-            context,
-            before,
-            after,
-            max_matches,
-            max_matches_per_file,
-            include_hidden,
-            no_ignore,
-        },
-    ) {
-        Ok(output) => tool_success_response_with_structured(
-            req,
-            output.render_text(),
-            json!({
-                "toolName": "search",
-                "searchPattern": output.pattern,
-                "searchPath": output.path,
-                "searchBackend": output.backend,
-                "searchBackendNote": output.backend_note,
-                "matchCount": output.match_count,
-                "searchTruncated": output.truncated,
-                "searchLimit": output.limit,
-                "searchResults": output.results,
-            }),
-        ),
-        Err(e) => tool_error_response(req, e),
+    match crate::bounded_search::search(workspace_root.to_owned(), request).await {
+        Ok(value) => tool_success_response_with_structured(req, String::new(), value),
+        Err(error) => tool_error_response(req, error),
     }
 }
 
@@ -4471,17 +5028,6 @@ fn optional_bool_argument(
     }
 }
 
-fn optional_usize_argument(arguments: &Value, name: &str) -> Result<Option<usize>, String> {
-    match arguments.get(name) {
-        Some(value) => value
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .map(Some)
-            .ok_or_else(|| format!("Parameter {name} must be a non-negative integer")),
-        None => Ok(None),
-    }
-}
-
 fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let path = match arguments.get("path").and_then(|v| v.as_str()) {
@@ -4545,6 +5091,48 @@ mod tests {
                 "arguments": arguments,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn ssh_operational_failure_is_structured_without_mcp_error() {
+        let missing_key =
+            std::env::temp_dir().join(format!("catdesk-missing-ssh-key-{}", Uuid::new_v4()));
+        let request = tool_call_request(
+            "ssh_exec",
+            json!({
+                "host": "127.0.0.1",
+                "user": "root",
+                "identity_file": missing_key.to_string_lossy(),
+                "command": "echo ok"
+            }),
+        );
+
+        let response = handle_ssh_exec(&request).await;
+        let result = response.result.as_ref().expect("missing result");
+        assert!(result.get("isError").is_none());
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structured content");
+        assert_eq!(structured.get("success"), Some(&json!(false)));
+        assert!(
+            structured
+                .get("stderr")
+                .and_then(Value::as_str)
+                .is_some_and(|stderr| stderr.contains("identity_file does not exist"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ssh_argument_validation_stays_mcp_error() {
+        let request = tool_call_request("ssh_exec", json!({ "command": "echo ok" }));
+        let response = handle_ssh_exec(&request).await;
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError")),
+            Some(&json!(true))
+        );
     }
 
     fn result_text(response: &JsonRpcResponse) -> &str {
@@ -5204,6 +5792,9 @@ mod tests {
                 "start_command",
                 "poll_command",
                 "cancel_command",
+                "ssh_exec",
+                "ssh_upload",
+                "ssh_download",
                 "screenshot",
                 "ui_tree",
                 "ui_click",
@@ -5220,6 +5811,10 @@ mod tests {
                 "agent_load",
                 "write",
                 "edit",
+                "patch_begin",
+                "patch_chunk",
+                "patch_apply",
+                "patch_abort",
                 "create_handoff",
                 "delete",
             ]
@@ -5276,6 +5871,9 @@ mod tests {
 
         for (tool_name, field) in [
             ("run_command", "stdout"),
+            ("ssh_exec", "stdout"),
+            ("ssh_upload", "remotePath"),
+            ("ssh_download", "localPath"),
             ("catdesk_instruction", "instructionText"),
             ("read", "files"),
             ("search", "searchResults"),
@@ -5284,6 +5882,10 @@ mod tests {
             ("agent_load", "totalBytes"),
             ("write", "bytesWritten"),
             ("edit", "operationCount"),
+            ("patch_begin", "id"),
+            ("patch_chunk", "sizeBytes"),
+            ("patch_apply", "sha256"),
+            ("patch_abort", "aborted"),
             ("create_handoff", "content"),
             ("delete", "recursive"),
         ] {

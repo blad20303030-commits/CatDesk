@@ -4,6 +4,8 @@ mod snapshot;
 
 use std::path::{Path, PathBuf};
 
+use crate::command::normalize_windows_verbatim_path;
+
 pub(crate) use diff::FileChange;
 
 const MAX_DIFF_FILES: usize = 16;
@@ -70,9 +72,10 @@ pub(crate) struct ChangeSession {
 
 impl ChangeSession {
     pub(crate) fn begin(workspace_root: &Path, scope: ChangeScope) -> Self {
-        let original_workspace_root = workspace_root.to_path_buf();
+        let original_workspace_root = normalize_windows_verbatim_path(workspace_root.to_path_buf());
         let workspace_root = workspace_root
             .canonicalize()
+            .map(normalize_windows_verbatim_path)
             .unwrap_or_else(|_| original_workspace_root.clone());
         let scope = normalize_scope_paths(&original_workspace_root, &workspace_root, scope);
         let before = snapshot::collect_snapshot(&workspace_root, &scope.targets);
@@ -101,6 +104,9 @@ fn normalize_scope_paths(
     mut scope: ChangeScope,
 ) -> ChangeScope {
     for target in &mut scope.targets {
+        // Resolve only the workspace root: canonicalizing each target would follow
+        // symlinks and would fail for files that the command has not created yet.
+        target.path = normalize_windows_verbatim_path(target.path.clone());
         if let Ok(relative) = target.path.strip_prefix(original_workspace_root) {
             target.path = canonical_workspace_root.join(relative);
         }
@@ -263,6 +269,69 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_resolved_targets_keep_workspace_relative_for_both_root_spellings() {
+        let root = workspace("windows-resolved-paths");
+        let canonical = root.canonicalize().expect("canonical workspace");
+        let portable = crate::command::normalize_windows_verbatim_path(canonical.clone());
+        for workspace_root in [&canonical, &portable] {
+            let root_text = workspace_root.to_string_lossy();
+            let existing = crate::command::resolve_workspace_path(&root_text, Some("existing.txt"))
+                .expect("resolve existing target");
+            let created = crate::command::resolve_workspace_path(&root_text, Some("new.txt"))
+                .expect("resolve missing target");
+            fs::write(&existing, "before\n").expect("initial file");
+            let session = ChangeSession::begin(
+                workspace_root,
+                ChangeScope::many(vec![
+                    ChangeTarget::explicit(existing.clone(), false),
+                    ChangeTarget::explicit(created.clone(), false),
+                ]),
+            );
+            fs::write(&existing, "after\n").expect("edit file");
+            fs::write(&created, "created\n").expect("create file");
+            let changes = session.changes();
+            let paths = changes
+                .iter()
+                .map(|change| change.path.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paths,
+                vec!["existing.txt", "new.txt"],
+                "root: {workspace_root:?}"
+            );
+            fs::remove_file(&existing).expect("delete existing file");
+            fs::remove_file(&created).expect("delete new file");
+        }
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resolved_targets_discovery_keeps_moves_relative_and_ignores_git() {
+        let root = workspace("windows-resolved-discovery");
+        let canonical = root.canonicalize().expect("canonical workspace");
+        let resolved = crate::command::resolve_workspace_path(&canonical.to_string_lossy(), None)
+            .expect("resolve command cwd");
+        fs::create_dir_all(root.join(".git")).expect("create git metadata");
+        fs::write(root.join(".git/HEAD"), "before").expect("initial git metadata");
+        fs::write(root.join("old.txt"), "content\n").expect("initial file");
+        let session = ChangeSession::begin(
+            &canonical,
+            ChangeScope::single(ChangeTarget::discovered(resolved, true)),
+        );
+        fs::rename(root.join("old.txt"), root.join("new.txt")).expect("move file");
+        fs::write(root.join(".git/HEAD"), "after").expect("change git metadata");
+        let changes = session.changes();
+        let paths = changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["new.txt", "old.txt"]);
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
     #[cfg(unix)]
     #[test]
     fn canonical_workspace_root_keeps_target_paths_workspace_relative() {
@@ -284,6 +353,24 @@ mod tests {
         assert_eq!(changes[0].path, "tracked.txt");
 
         let _ = fs::remove_file(alias);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_resolved_new_file_stays_workspace_relative() {
+        let root = workspace("windows-command-resolved-new-file");
+        let root_str = root.to_string_lossy().into_owned();
+        let target = crate::command::resolve_workspace_path(&root_str, Some("notes.txt"))
+            .expect("resolve target");
+        let session = ChangeSession::begin(
+            &root,
+            ChangeScope::single(ChangeTarget::explicit(target, false)),
+        );
+        fs::write(root.join("notes.txt"), "hello\n").expect("write new file");
+        let changes = session.changes();
+        assert_eq!(changes.len(), 1, "changes={changes:?}");
+        assert_eq!(changes[0].path, "notes.txt", "changes={changes:?}");
         let _ = fs::remove_dir_all(root);
     }
 

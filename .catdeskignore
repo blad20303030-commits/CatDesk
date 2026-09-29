@@ -1,0 +1,18 @@
+# CatDesk default search exclusions for generated/heavy artifacts.
+# Explicitly selecting one of these directories as the search root still works.
+target/
+node_modules/
+.catdesk-worktrees/
+.worktrees/
+dist/
+build/
+coverage/
+.cache/
+.turbo/
+.next/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.iso

@@ -1,8 +1,10 @@
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_MAX_AGENTS: usize = 4;
 pub const DEFAULT_MAX_SKILLS: usize = 8;
@@ -15,6 +17,7 @@ pub const MAX_LOAD_SKILLS: usize = 24;
 pub const MAX_LOAD_DESIGNS: usize = 8;
 const MAX_SINGLE_ENTRY_BYTES: usize = 160 * 1024;
 const MAX_BUNDLE_BYTES: usize = 640 * 1024;
+const CATALOG_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,12 +85,54 @@ struct CatalogLocation {
     source: String,
 }
 
+#[derive(Clone, Debug)]
+struct CachedCatalog {
+    scanned_at: Instant,
+    entries: Arc<Vec<CatalogEntry>>,
+}
+
+static CATALOG_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedCatalog>>> = OnceLock::new();
+
+fn catalog_cache() -> &'static Mutex<HashMap<PathBuf, CachedCatalog>> {
+    CATALOG_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_catalog(root: &Path) -> Result<Arc<Vec<CatalogEntry>>, String> {
+    let now = Instant::now();
+    {
+        let cache = catalog_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(root)
+            && now.duration_since(cached.scanned_at) < CATALOG_CACHE_TTL
+        {
+            return Ok(Arc::clone(&cached.entries));
+        }
+    }
+
+    let entries = Arc::new(scan_catalog(root)?);
+    let mut cache = catalog_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.insert(
+        root.to_path_buf(),
+        CachedCatalog {
+            scanned_at: Instant::now(),
+            entries: Arc::clone(&entries),
+        },
+    );
+    Ok(entries)
+}
+
 pub fn status(workspace_root: &str) -> Result<CatalogStatus, String> {
     let location = locate_catalog(workspace_root)?;
-    let entries = scan_catalog(&location.root)?;
+    let entries = cached_catalog(&location.root)?;
     let agent_count = entries.iter().filter(|entry| entry.kind == "agent").count();
     let skill_count = entries.iter().filter(|entry| entry.kind == "skill").count();
-    let design_count = entries.iter().filter(|entry| entry.kind == "design").count();
+    let design_count = entries
+        .iter()
+        .filter(|entry| entry.kind == "design")
+        .count();
 
     Ok(CatalogStatus {
         root: location.root.to_string_lossy().into_owned(),
@@ -112,11 +157,11 @@ pub fn route(
     }
 
     let location = locate_catalog(workspace_root)?;
-    let entries = scan_catalog(&location.root)?;
+    let entries = cached_catalog(&location.root)?;
     Ok(route_entries(
         &location.root,
         task,
-        &entries,
+        entries.as_slice(),
         max_agents.clamp(1, MAX_ROUTE_AGENTS),
         max_skills.clamp(1, MAX_ROUTE_SKILLS),
         max_designs.clamp(1, MAX_ROUTE_DESIGNS),
@@ -143,7 +188,7 @@ pub fn load(
     }
 
     let location = locate_catalog(workspace_root)?;
-    let entries = scan_catalog(&location.root)?;
+    let entries = cached_catalog(&location.root)?;
     let mut total_bytes = 0usize;
     let mut bundle_truncated = false;
 
@@ -165,7 +210,7 @@ pub fn load(
     )?;
     let designs = load_kind(
         &location.root,
-        &entries,
+        entries.as_slice(),
         "design",
         design_names,
         &mut total_bytes,
@@ -299,7 +344,11 @@ fn collect_skill_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<(), Stri
     collect_named_files(dir, "SKILL.md", output)
 }
 
-fn collect_named_files(dir: &Path, filename: &str, output: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_named_files(
+    dir: &Path,
+    filename: &str,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     for item in
         fs::read_dir(dir).map_err(|error| format!("Failed to read {}: {error}", dir.display()))?
     {
@@ -658,9 +707,42 @@ mod tests {
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(loaded.designs.len(), 1);
         assert!(loaded.skills[0].content.contains("Test everything."));
-        assert!(loaded.designs[0].content.contains("premium editorial system"));
+        assert!(
+            loaded.designs[0]
+                .content
+                .contains("premium editorial system")
+        );
 
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn catalog_cache_reuses_entries_and_refreshes_after_ttl() {
+        let root = fixture();
+        let first = cached_catalog(&root).unwrap();
+        let second = cached_catalog(&root).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        fs::write(
+            root.join("skills").join("testing").join("SKILL.md"),
+            "---\nname: testing\ndescription: Updated cache fixture\n---\nUpdated.\n",
+        )
+        .unwrap();
+        {
+            let mut cache = catalog_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.get_mut(&root).unwrap().scanned_at =
+                Instant::now() - CATALOG_CACHE_TTL - Duration::from_millis(1);
+        }
+
+        let refreshed = cached_catalog(&root).unwrap();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert!(refreshed.iter().any(|entry| {
+            entry.name == "testing" && entry.description == "Updated cache fixture"
+        }));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -677,7 +759,10 @@ mod tests {
             2
         );
         assert_eq!(
-            entries.iter().filter(|entry| entry.kind == "design").count(),
+            entries
+                .iter()
+                .filter(|entry| entry.kind == "design")
+                .count(),
             1
         );
         assert!(entries.iter().any(|entry| entry.name == "code-reviewer"));

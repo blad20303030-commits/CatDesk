@@ -1,5 +1,6 @@
 mod agent_catalog;
 mod binagotchy_gen;
+mod bounded_search;
 mod browser;
 mod change_tracking;
 mod command;
@@ -13,8 +14,10 @@ mod macos_terminal;
 mod mascot;
 mod mcp;
 mod ngrok;
+mod patch_transport;
 mod process_runner;
 mod server;
+mod ssh_remote;
 mod startup;
 mod state;
 mod theme;
@@ -1591,53 +1594,54 @@ async fn run_app(
     // Draw mode selection screen unless an existing configuration is being
     // restarted non-interactively (used by the local ChatGPT connector).
     if !autostart {
-    loop {
-        let (current_theme, current_tool_mode, current_ui_language) = {
-            let app = state.lock().await;
-            (app.current_theme(), app.tool_mode, app.ui_language)
-        };
-        terminal
-            .draw(|f| draw_mode_select(f, current_theme, current_tool_mode, current_ui_language))?;
+        loop {
+            let (current_theme, current_tool_mode, current_ui_language) = {
+                let app = state.lock().await;
+                (app.current_theme(), app.tool_mode, app.ui_language)
+            };
+            terminal.draw(|f| {
+                draw_mode_select(f, current_theme, current_tool_mode, current_ui_language)
+            })?;
 
-        if event::poll(UI_POLL_INTERVAL)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let mode = match key.code {
-                    KeyCode::Char('1') => Mode::Computer,
-                    KeyCode::Char('2') => Mode::Browser,
-                    KeyCode::Char('3') => Mode::Both,
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Char('l') | KeyCode::Char('L') => {
+            if event::poll(UI_POLL_INTERVAL)? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    let mode = match key.code {
+                        KeyCode::Char('1') => Mode::Computer,
+                        KeyCode::Char('2') => Mode::Browser,
+                        KeyCode::Char('3') => Mode::Both,
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                            let mut app = state.lock().await;
+                            app.ui_language = app.ui_language.toggled();
+                            let language = app.ui_language.label();
+                            app.log("INFO", format!("UI language: {language}"));
+                            app.persist_state_with_log();
+                            continue;
+                        }
+                        KeyCode::Char('s') => {
+                            run_settings(terminal, state.clone()).await?;
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    {
                         let mut app = state.lock().await;
-                        app.ui_language = app.ui_language.toggled();
-                        let language = app.ui_language.label();
-                        app.log("INFO", format!("UI language: {language}"));
+                        app.mode = mode;
+                        app.log("INFO", format!("Mode: {}", mode.label()));
                         app.persist_state_with_log();
-                        continue;
                     }
-                    KeyCode::Char('s') => {
-                        run_settings(terminal, state.clone()).await?;
-                        continue;
-                    }
-                    _ => continue,
-                };
-                {
-                    let mut app = state.lock().await;
-                    app.mode = mode;
-                    app.log("INFO", format!("Mode: {}", mode.label()));
-                    app.persist_state_with_log();
+                    break;
                 }
-                break;
             }
         }
-    }
     } else {
-        state
-            .lock()
-            .await
-            .log("INFO", "Autostart: using persisted CatDesk mode and settings".into());
+        state.lock().await.log(
+            "INFO",
+            "Autostart: using persisted CatDesk mode and settings".into(),
+        );
     }
 
     if mode_is_browser_enabled(state.clone()).await && !autostart {
@@ -4188,7 +4192,8 @@ fn browser_identity_matches(
     browser: &browser::DetectedBrowser,
     selected: &browser::DetectedBrowser,
 ) -> bool {
-    browser.path == selected.path && browser.binary == selected.binary
+    (browser.path == selected.path && browser.binary == selected.binary)
+        || browser.name == selected.name
 }
 
 fn selected_supported_browser_idx(
@@ -4643,7 +4648,15 @@ async fn ensure_selected_browser_remote_debugging(
         );
         return None;
     }
-    if selected.remote_debug_active && selected.remote_debug_target.is_some() {
+    // A TCP DevTools endpoint is the desired transport. A `pipe` target means
+    // Chrome was launched by Puppeteer/chrome-devtools-mcp; Google may reject
+    // OAuth in that WebDriver-controlled browser, so Windows must not reuse it.
+    if selected.remote_debug_active
+        && selected
+            .remote_debug_target
+            .as_deref()
+            .is_some_and(|target| target != "pipe")
+    {
         return Some(selected);
     }
 
@@ -4655,14 +4668,26 @@ async fn ensure_selected_browser_remote_debugging(
         return Some(selected);
     };
 
-    let user_data_dir = format!(
-        "/tmp/catdesk-remote-debug-{}",
-        sanitize_for_filename(&selected.binary)
-    );
+    let user_data_dir = match user_home_dir() {
+        Ok(home) => home
+            .join(".catdesk")
+            .join("browser-profiles")
+            .join(sanitize_for_filename(&selected.binary)),
+        Err(error) => {
+            state.lock().await.log(
+                "ERROR",
+                format!("Failed to resolve CatDesk browser profile directory: {error}"),
+            );
+            return Some(selected);
+        }
+    };
     if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
         state.lock().await.log(
             "WARN",
-            format!("Failed to create user data dir {user_data_dir}: {e}"),
+            format!(
+                "Failed to create user data dir {}: {e}",
+                user_data_dir.display()
+            ),
         );
     }
 
@@ -4670,7 +4695,7 @@ async fn ensure_selected_browser_remote_debugging(
     command
         .arg(format!("--remote-debugging-port={port}"))
         .arg("--remote-debugging-address=127.0.0.1")
-        .arg(format!("--user-data-dir={user_data_dir}"))
+        .arg(format!("--user-data-dir={}", user_data_dir.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .stdin(std::process::Stdio::null())
@@ -4761,16 +4786,54 @@ async fn start_services(
         detected_browsers = browser::detect_browsers();
     }
     if mode.browser_enabled() {
-        selected_browser =
-            ensure_selected_browser_remote_debugging(state.clone(), selected_browser).await;
-        detected_browsers = browser::detect_browsers();
-        if let Some(selected) = &selected_browser {
+        // Refresh a persisted browser selection against current detection before
+        // using it. Older Windows configs stored Unix-style executable names;
+        // matching by browser identity migrates them to the actual chrome.exe.
+        if let Some(selected) = selected_browser.as_ref() {
             if let Some(refreshed) = detected_browsers
                 .iter()
-                .find(|b| b.path == selected.path && b.binary == selected.binary)
+                .find(|browser| browser_identity_matches(browser, selected))
                 .cloned()
             {
                 selected_browser = Some(refreshed);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let chrome_auto_connect = selected_browser
+                .as_ref()
+                .is_some_and(|browser| browser.binary.starts_with("google-chrome"));
+            if chrome_auto_connect {
+                state.lock().await.log(
+                    "INFO",
+                    "Using Chrome remote-debugging auto-connect for the existing user profile"
+                        .into(),
+                );
+            } else {
+                selected_browser =
+                    ensure_selected_browser_remote_debugging(state.clone(), selected_browser).await;
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            selected_browser =
+                ensure_selected_browser_remote_debugging(state.clone(), selected_browser).await;
+        }
+        detected_browsers = browser::detect_browsers();
+        if let Some(selected) = selected_browser.clone() {
+            if let Some(refreshed) = detected_browsers
+                .iter_mut()
+                .find(|b| b.path == selected.path && b.binary == selected.binary)
+            {
+                // Windows process discovery currently cannot recover Chromium's
+                // command-line flags. Preserve the endpoint we just launched
+                // and verified instead of replacing it with an inactive scan.
+                if selected.remote_debug_active {
+                    refreshed.remote_debug_active = true;
+                    refreshed.remote_debug_target = selected.remote_debug_target.clone();
+                    refreshed.remote_debug_pid = selected.remote_debug_pid;
+                }
+                selected_browser = Some(refreshed.clone());
             }
         }
         let mut app = state.lock().await;
@@ -4915,9 +4978,19 @@ async fn start_services(
         app.log("INFO", format!("MCP Server started on port {port}"));
     }
 
-    // Start ngrok
-    if let Err(e) = ngrok::start(state.clone()).await {
-        state.lock().await.log("ERROR", format!("ngrok: {e}"));
+    // Start ngrok unless an external tunnel/router owns the public endpoint.
+    let disable_ngrok = std::env::var("CATDESK_DISABLE_NGROK")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    if !disable_ngrok {
+        if let Err(e) = ngrok::start(state.clone()).await {
+            state.lock().await.log("ERROR", format!("ngrok: {e}"));
+        }
+    } else {
+        state
+            .lock()
+            .await
+            .log("INFO", "ngrok disabled by CATDESK_DISABLE_NGROK".into());
     }
 
     devtools_bridge
