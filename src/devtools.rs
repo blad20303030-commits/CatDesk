@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -364,6 +364,29 @@ async fn fail_generation(pending: &PendingRequests, generation: u64) {
     map.retain(|(entry_generation, _), _| *entry_generation != generation);
 }
 
+fn chrome_devtools_active_port_endpoint_from(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let port = lines.next()?.parse::<u16>().ok()?;
+    let browser_path = lines.next()?;
+    if !browser_path.starts_with('/') {
+        return None;
+    }
+    Some(format!("ws://127.0.0.1:{port}{browser_path}"))
+}
+
+fn chrome_devtools_active_port_endpoint() -> Option<String> {
+    let path = user_home_dir()
+        .ok()?
+        .join("AppData")
+        .join("Local")
+        .join("Google")
+        .join("Chrome")
+        .join("User Data")
+        .join("DevToolsActivePort");
+    chrome_devtools_active_port_endpoint_from(&path)
+}
+
 fn build_launch_args(selected_browser: Option<&DetectedBrowser>) -> Result<Vec<String>, String> {
     let mut args = vec![
         "-y".to_string(),
@@ -376,11 +399,15 @@ fn build_launch_args(selected_browser: Option<&DetectedBrowser>) -> Result<Vec<S
 
     if let Some(browser) = selected_browser {
         if cfg!(target_os = "windows") && browser.binary.starts_with("google-chrome") {
-            // Chrome 144+ can expose the user's already-running browser session
-            // through chrome://inspect/#remote-debugging. Prefer that session on
-            // Windows so ChatGPT keeps the user's real profile, cookies, tabs,
-            // and current conversation instead of a second managed profile.
-            args.push("--autoConnect".into());
+            // Prefer CatDesk's own DevToolsActivePort resolution on Windows.
+            // This avoids chrome-devtools-mcp having to rediscover a Unicode
+            // profile path and preserves the user's existing Chrome session.
+            if let Some(endpoint) = chrome_devtools_active_port_endpoint() {
+                args.push("--wsEndpoint".into());
+                args.push(endpoint);
+            } else {
+                args.push("--autoConnect".into());
+            }
         } else if cfg!(target_os = "windows") {
             let target = browser
                 .remote_debug_target
@@ -1398,6 +1425,18 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "chrome-devtools-mcp@1.10.1"));
         assert!(!args.iter().any(|arg| arg.contains("@latest")));
         assert!(args.iter().any(|arg| arg == "--no-usage-statistics"));
+    }
+
+    #[test]
+    fn devtools_active_port_is_parsed_into_ws_endpoint() {
+        let path =
+            std::env::temp_dir().join(format!("catdesk-devtools-active-port-{}", Uuid::new_v4()));
+        std::fs::write(&path, "2884\n/devtools/browser/test-id\n").unwrap();
+        assert_eq!(
+            chrome_devtools_active_port_endpoint_from(&path).as_deref(),
+            Some("ws://127.0.0.1:2884/devtools/browser/test-id")
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

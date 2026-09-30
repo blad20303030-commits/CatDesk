@@ -1,14 +1,15 @@
 //! Bounded, streaming, read-only search. No global file list and no subprocess per file.
 //! Blocking filesystem work has cooperative cancellation and a process-wide concurrency cap.
 use crate::workspace_tools::SearchTextEntry;
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, gitignore::GitignoreBuilder};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -167,6 +168,8 @@ struct Output {
     entries: Vec<SearchTextEntry>,
     matches: usize,
     diag: Diagnostics,
+    backend: &'static str,
+    backend_note: &'static str,
 }
 impl Output {
     fn new() -> Self {
@@ -174,6 +177,8 @@ impl Output {
             entries: vec![],
             matches: 0,
             diag: Diagnostics::default(),
+            backend: "rust-stream",
+            backend_note: "Bounded embedded ignore/regex engine; no rg/grep subprocess. Limits count content bytes, not filesystem metadata IO.",
         }
     }
     fn reason(&mut self, reason: &str) {
@@ -185,8 +190,8 @@ impl Output {
         self.diag.elapsed_ms = ms(start.elapsed());
         self.diag.worker_stopped = worker_stopped;
         json!({"toolName":"search","searchPattern":req.pattern,
-            "searchPath":req.path.as_deref().unwrap_or("."),"searchBackend":"rust-stream",
-            "searchBackendNote":"Bounded embedded ignore/regex engine; no rg/grep subprocess. Limits count content bytes, not filesystem metadata IO.",
+            "searchPath":req.path.as_deref().unwrap_or("."),"searchBackend":self.backend,
+            "searchBackendNote":self.backend_note,
             "matchCount":self.matches,"searchTruncated":!self.diag.stop_reasons.is_empty(),
             "searchLimit":req.max_matches.unwrap_or(100),"searchResults":self.entries,
             "searchDiagnostics":self.diag,
@@ -334,8 +339,10 @@ impl Scan<'_> {
             self.output.reason("file_size_limit");
             return Ok(true);
         }
-        let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-        if !canonical.starts_with(root) {
+        // The walker starts from a canonical path below the canonical workspace root,
+        // does not follow symlinks, and symlink files are rejected above. Re-canonicalizing
+        // every file is therefore redundant and disproportionately expensive on Windows/NTFS.
+        if !path.starts_with(root) {
             self.output.reason("outside_scope");
             return Ok(true);
         }
@@ -495,6 +502,240 @@ impl Scan<'_> {
         }
     }
 }
+
+fn git_output(repo: &Path, args: &[&str]) -> Option<std::process::Output> {
+    StdCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()
+}
+
+fn nul_paths(output: &[u8], repo_root: &Path) -> Vec<PathBuf> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|item| !item.is_empty())
+        .map(|item| repo_root.join(String::from_utf8_lossy(item).as_ref()))
+        .collect()
+}
+
+fn has_hidden_component(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(name) => name
+            .to_str()
+            .is_some_and(|name| name.starts_with('.') && name != "." && name != ".."),
+        _ => false,
+    })
+}
+
+fn is_source_only_excluded(relative_to_start: &Path) -> bool {
+    const HEAVY: &[&str] = &[
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".git",
+        ".next",
+        ".venv",
+        "__pycache__",
+        ".catdesk-worktrees",
+        ".worktrees",
+        "coverage",
+        ".cache",
+        ".turbo",
+    ];
+    if relative_to_start
+        .components()
+        .any(|component| match component {
+            Component::Normal(name) => name
+                .to_str()
+                .is_some_and(|name| HEAVY.iter().any(|heavy| name.eq_ignore_ascii_case(heavy))),
+            _ => false,
+        })
+    {
+        return true;
+    }
+    let lower = relative_to_start
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [".tar", ".tar.gz", ".tgz", ".zip", ".7z", ".iso"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+fn custom_ignore_matcher(
+    repo_root: &Path,
+    start: &Path,
+    indexed: &[PathBuf],
+) -> Option<ignore::gitignore::Gitignore> {
+    let mut ignore_files = Vec::<PathBuf>::new();
+
+    // Ancestor custom ignore files can affect the selected search root.
+    let mut cursor = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+    loop {
+        for name in [".catdeskignore", ".rgignore"] {
+            let candidate = cursor.join(name);
+            if candidate.is_file() {
+                ignore_files.push(candidate);
+            }
+        }
+        if cursor == repo_root {
+            break;
+        }
+        let parent = cursor.parent()?.to_path_buf();
+        if !parent.starts_with(repo_root) {
+            break;
+        }
+        cursor = parent;
+    }
+
+    // Nested custom ignore files affect their descendants. Git's index gives us
+    // a cheap directory inventory without walking generated trees.
+    for path in indexed {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, ".catdeskignore" | ".rgignore"))
+        {
+            ignore_files.push(path.clone());
+        }
+    }
+
+    ignore_files.sort_by_key(|path| path.components().count());
+    ignore_files.dedup();
+
+    if ignore_files.is_empty() {
+        return None;
+    }
+
+    let mut builder = GitignoreBuilder::new(repo_root);
+    let mut added = false;
+    for path in ignore_files {
+        if builder.add(path).is_none() {
+            added = true;
+        }
+    }
+    added.then(|| builder.build().ok()).flatten()
+}
+
+fn git_prefilter_candidates(start: &Path, req: &Request) -> Option<Vec<PathBuf>> {
+    // Keep the optimization narrow: literal coding searches with normal ignore
+    // semantics. Regex/glob/no-ignore paths retain the exhaustive bounded walker.
+    if !req.fixed_strings || req.no_ignore || req.glob.is_some() || req.pattern.contains('\n') {
+        return None;
+    }
+
+    let probe = if start.is_dir() {
+        start
+    } else {
+        start.parent()?
+    };
+    let top = git_output(probe, &["rev-parse", "--show-toplevel"])?;
+    if !top.status.success() {
+        return None;
+    }
+    let repo_text = String::from_utf8_lossy(&top.stdout);
+    let repo_root = PathBuf::from(repo_text.trim()).canonicalize().ok()?;
+    if !start.starts_with(&repo_root) {
+        return None;
+    }
+
+    let pathspec = start.strip_prefix(&repo_root).ok().map(|path| {
+        if path.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            path.to_string_lossy().replace('\\', "/")
+        }
+    })?;
+
+    let mut grep_args = vec!["grep", "-z", "-l", "-F", "-I"];
+    if req.case_insensitive {
+        grep_args.push("-i");
+    }
+    grep_args.extend(["-e", req.pattern.as_str(), "--", pathspec.as_str()]);
+    let tracked = git_output(&repo_root, &grep_args)?;
+    // git grep returns 1 when there are no matches.
+    if !tracked.status.success() && tracked.status.code() != Some(1) {
+        return None;
+    }
+
+    let indexed = git_output(
+        &repo_root,
+        &[
+            "ls-files",
+            "-c",
+            "-o",
+            "--exclude-standard",
+            "-z",
+            "--",
+            pathspec.as_str(),
+        ],
+    )?;
+    if !indexed.status.success() {
+        return None;
+    }
+    let indexed_paths = nul_paths(&indexed.stdout, &repo_root);
+    let custom_ignore = custom_ignore_matcher(&repo_root, start, &indexed_paths);
+
+    let untracked = git_output(
+        &repo_root,
+        &[
+            "ls-files",
+            "-o",
+            "--exclude-standard",
+            "-z",
+            "--",
+            pathspec.as_str(),
+        ],
+    )?;
+    if !untracked.status.success() {
+        return None;
+    }
+
+    let mut candidates = nul_paths(&tracked.stdout, &repo_root);
+    candidates.extend(nul_paths(&untracked.stdout, &repo_root));
+    candidates.sort();
+    candidates.dedup();
+
+    if candidates.len() > MAX_ENTRIES {
+        return None;
+    }
+
+    let start_dir = if start.is_dir() {
+        start
+    } else {
+        start.parent()?
+    };
+    candidates.retain(|path| {
+        if !path.starts_with(start_dir) || !path.is_file() {
+            return false;
+        }
+        let rel_start = path.strip_prefix(start_dir).unwrap_or(path);
+        if !req.include_hidden && has_hidden_component(rel_start) {
+            return false;
+        }
+        if req.source_only && is_source_only_excluded(rel_start) {
+            return false;
+        }
+        if custom_ignore
+            .as_ref()
+            .is_some_and(|matcher| matcher.matched_path_or_any_parents(path, false).is_ignore())
+        {
+            return false;
+        }
+        true
+    });
+
+    Some(candidates)
+}
+
 fn scan(
     workspace: &str,
     req: &Request,
@@ -546,6 +787,31 @@ fn scan(
         return Ok(run.output);
     }
     let scan_start = Instant::now();
+
+    if let Some(candidates) = git_prefilter_candidates(&start, req) {
+        run.output.backend = "git-prefilter+rust-stream";
+        run.output.backend_note = "Git index narrows tracked literal matches and adds untracked non-ignored files; CatDesk re-scans candidates for exact context/result semantics.";
+        run.output.diag.visited_entries = candidates.len();
+        for path in candidates {
+            if !run.check() {
+                break;
+            }
+            match run.file(&root, &path) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(_) => {
+                    run.output.diag.io_errors += 1;
+                    run.output.reason("io_error");
+                }
+            }
+            run.publish();
+        }
+        run.check();
+        run.output.diag.scan_ms = ms(scan_start.elapsed());
+        run.publish();
+        return Ok(run.output);
+    }
+
     let excluded = Arc::new(AtomicUsize::new(0));
     let excluded_filter = excluded.clone();
     let visited = Arc::new(AtomicUsize::new(0));

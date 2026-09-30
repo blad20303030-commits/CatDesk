@@ -136,3 +136,55 @@ async fn timeout_is_bounded_and_does_not_create_unbounded_queue() {
     assert!(reason(&value, "time_budget"));
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn git_prefilter_finds_tracked_and_untracked_non_ignored_files() {
+    let root = temp_root("git-prefilter");
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(&root)
+        .status();
+    if !status.is_ok_and(|status| status.success()) {
+        let _ = std::fs::remove_dir_all(root);
+        return;
+    }
+
+    std::fs::write(root.join("tracked.txt"), "TOKEN tracked\n").unwrap();
+    std::fs::write(root.join("untracked.txt"), "TOKEN untracked\n").unwrap();
+    std::fs::write(root.join("ignored.txt"), "TOKEN ignored\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "tracked.txt", ".gitignore"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let value = run(
+        &root,
+        &Request {
+            fixed_strings: true,
+            ..request("TOKEN")
+        },
+    );
+    assert_eq!(value["searchBackend"], "git-prefilter+rust-stream");
+    assert_eq!(value["matchCount"], 2);
+
+    let paths = value["searchResults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["isContext"] == false)
+        .filter_map(|entry| entry["path"].as_str())
+        .collect::<Vec<_>>();
+    assert!(paths.iter().any(|path| path.ends_with("tracked.txt")));
+    assert!(paths.iter().any(|path| path.ends_with("untracked.txt")));
+    assert!(!paths.iter().any(|path| path.ends_with("ignored.txt")));
+
+    let _ = std::fs::remove_dir_all(root);
+}

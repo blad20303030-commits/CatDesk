@@ -243,7 +243,10 @@ fn resolve_target_path(workspace_root: &str, path: &str) -> Result<PathBuf, Stri
     command::resolve_workspace_path(workspace_root, Some(path))
 }
 
-fn resolve_read_path(workspace_root: &str, path: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_read_path(
+    workspace_root: &str,
+    path: Option<&str>,
+) -> Result<PathBuf, String> {
     let root = workspace_root_path(workspace_root)?;
     let Some(path) = path.filter(|value| !value.trim().is_empty() && *value != ".") else {
         return Ok(root);

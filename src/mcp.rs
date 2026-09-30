@@ -50,10 +50,10 @@ const INITIAL_MASCOT_OUTLINE_PLACEHOLDER: &str = "__catdeskInitialMascotOutlineP
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
 const CATDESK_INSTRUCTION_REQUIRED_MESSAGE: &str =
     "Call catdesk_instruction successfully before using any other CatDesk tool.";
-const CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE: &str = "ChatGPT didn’t call catdesk_instruction. CatDesk is asking it to call it now. You can ignore this message. It will retry automatically.";
+const CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE: &str = "ChatGPT didnвЂ™t call catdesk_instruction. CatDesk is asking it to call it now. You can ignore this message. It will retry automatically.";
 const CATDESK_INSTRUCTION_REQUIRED_CODE: &str = "CATDESK_INSTRUCTION_REQUIRED";
 
-// ── JSON-RPC types ──────────────────────────────────────────
+// в”Ђв”Ђ JSON-RPC types в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 #[derive(Deserialize)]
 pub struct JsonRpcRequest {
@@ -124,7 +124,7 @@ struct AutoWidgetContext {
     turn_files: Vec<FileChange>,
 }
 
-// ── Handler ─────────────────────────────────────────────────
+// в”Ђв”Ђ Handler в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 #[cfg(test)]
 pub async fn handle_request(
@@ -454,7 +454,7 @@ fn handle_resources_read_with_show_detail_mode(
     )
 }
 
-// ── tools/list ──────────────────────────────────────────────
+// в”Ђв”Ђ tools/list в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 fn local_tool_output_schema(name: &str) -> Option<Value> {
     let mut properties = Map::new();
@@ -702,6 +702,103 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                             "text": { "type": "string" }
                         },
                         "required": ["seq", "stream", "text"]
+                    }
+                }),
+            );
+        }
+        "symbol_lookup" => {
+            properties.insert("cached".to_string(), json!({ "type": "boolean" }));
+            properties.insert(
+                "fileCount".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert(
+                "symbolCount".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert(
+                "buildMs".to_string(),
+                json!({ "type": "number", "minimum": 0 }),
+            );
+            properties.insert(
+                "lookupMs".to_string(),
+                json!({ "type": "number", "minimum": 0 }),
+            );
+            properties.insert(
+                "hits".to_string(),
+                json!({ "type": "array", "items": { "type": "array" } }),
+            );
+        }
+        "repo_snapshot" => {
+            properties.insert(
+                "elapsedMs".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert("git".to_string(), json!({ "type": "object" }));
+            properties.insert("read".to_string(), json!({ "type": "object" }));
+            properties.insert(
+                "searches".to_string(),
+                json!({ "type": "array", "items": { "type": "object" } }),
+            );
+        }
+        "apply_and_verify" => {
+            properties.insert(
+                "elapsedMs".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert(
+                "edits".to_string(),
+                json!({ "type": "array", "items": { "type": "object" } }),
+            );
+            properties.insert(
+                "verification".to_string(),
+                json!({ "type": "array", "items": { "type": "object" } }),
+            );
+            properties.insert("diff".to_string(), json!({ "type": "object" }));
+        }
+        "run_script" => {
+            properties.insert("path".to_string(), json!({ "type": "string" }));
+            properties.insert("stdout".to_string(), json!({ "type": "string" }));
+            properties.insert("stderr".to_string(), json!({ "type": "string" }));
+            properties.insert(
+                "exitCode".to_string(),
+                json!({ "type": ["integer", "null"] }),
+            );
+            properties.insert(
+                "elapsedMs".to_string(),
+                json!({ "type": "integer", "minimum": 0 }),
+            );
+            properties.insert("timedOut".to_string(), json!({ "type": "boolean" }));
+            properties.insert("stdoutTruncated".to_string(), json!({ "type": "boolean" }));
+            properties.insert("stderrTruncated".to_string(), json!({ "type": "boolean" }));
+        }
+        "run_batch" => {
+            properties.insert("cwd".to_string(), json!({ "type": "string" }));
+            properties.insert("stopOnError".to_string(), json!({ "type": "boolean" }));
+            for field in ["elapsedMs", "commandCount", "completedCount"] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "integer", "minimum": 0 }),
+                );
+            }
+            properties.insert(
+                "results".to_string(),
+                json!({
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string" },
+                            "stdout": { "type": "string" },
+                            "stderr": { "type": "string" },
+                            "success": { "type": "boolean" },
+                            "exitCode": { "type": ["integer", "null"] },
+                            "elapsedMs": { "type": "integer", "minimum": 0 },
+                            "timedOut": { "type": "boolean" },
+                            "stdoutTruncated": { "type": "boolean" },
+                            "stderrTruncated": { "type": "boolean" }
+                        },
+                        "required": ["command", "stdout", "stderr", "success", "exitCode", "elapsedMs", "timedOut", "stdoutTruncated", "stderrTruncated"]
                     }
                 }),
             );
@@ -1160,6 +1257,52 @@ async fn handle_tools_list_with_show_detail_mode(
                 "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
             }));
             tools.push(json!({
+                "name": "run_script",
+                "title": "Run workspace script",
+                "description": "Execute an existing .ps1, .py, .cmd, or .bat file from the workspace using a short path-based MCP payload. Prefer this instead of embedding large scripts in run_command arguments.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "minLength": 1 },
+                        "args": { "type": "array", "maxItems": 64, "items": { "type": "string" } },
+                        "cwd": { "type": "string" },
+                        "timeout": { "type": "integer", "minimum": 1, "maximum": command::MAX_TIMEOUT_MS }
+                    },
+                    "required": ["path"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "run_batch",
+                "title": "Run command batch",
+                "description": "Execute 1..32 short shell commands sequentially inside one MCP call. Prefer this when multiple short commands can share one cwd so transport and dispatch overhead is paid once.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "commands": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 32,
+                            "items": { "type": "string", "minLength": 1 },
+                            "description": "Short shell commands to execute sequentially."
+                        },
+                        "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it." },
+                        "timeout": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": command::MAX_TIMEOUT_MS,
+                            "description": "Per-command timeout in milliseconds."
+                        },
+                        "stop_on_error": {
+                            "type": "boolean",
+                            "description": "Stop after the first failed command. Defaults to true."
+                        }
+                    },
+                    "required": ["commands"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+            tools.push(json!({
                 "name": "start_command",
                 "title": "Start command",
                 "description": "Start a long-running shell command inside the workspace and return a job ID immediately. Prefer this for builds, compilation, dependency installation, long test suites, and development servers instead of keeping run_command open.",
@@ -1304,6 +1447,61 @@ async fn handle_tools_list_with_show_detail_mode(
             "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
         }));
         tools.push(json!({
+            "name": "symbol_lookup",
+            "title": "Lookup repository symbols",
+            "description": "Lookup up to 32 named code symbols from a short-lived in-memory repository index and return file, line, kind, and declaration context without rescanning for each symbol.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string" },
+                    "names": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": { "type": "string", "minLength": 1 }
+                    },
+                    "refresh": { "type": "boolean", "default": false }
+                },
+                "required": ["names"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }));
+        tools.push(json!({
+            "name": "repo_snapshot",
+            "title": "Repository snapshot",
+            "description": "Collect git status/branch/HEAD, read up to 32 files, and run up to 8 bounded searches in one MCP call. Prefer this at the start of coding/debugging work instead of separate git/read/search calls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cwd": { "type": "string", "description": "Repository directory inside the workspace. Defaults to workspace root." },
+                    "paths": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": { "type": "string", "minLength": 1 },
+                        "description": "Files to read in one batch."
+                    },
+                    "searches": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pattern": { "type": "string", "minLength": 1 },
+                                "path": { "type": "string" },
+                                "glob": { "type": "string" },
+                                "fixed_strings": { "type": "boolean" },
+                                "case_insensitive": { "type": "boolean" },
+                                "context": { "type": "integer", "minimum": 0, "maximum": 20 },
+                                "max_matches": { "type": "integer", "minimum": 1, "maximum": 500 }
+                            },
+                            "required": ["pattern"]
+                        }
+                    }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }));
+        tools.push(json!({
             "name": "search",
             "title": "Search text",
             "description": "Streaming read-only search using embedded ignore/regex with a 5s default budget, bounded content bytes and output. Partial results include explicit reasons. Generated/heavy directories are skipped by default; explicit roots remain searchable.",
@@ -1394,6 +1592,69 @@ async fn handle_tools_list_with_show_detail_mode(
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
+            if tool_mode.run_command_enabled() {
+                tools.push(json!({
+                    "name": "apply_and_verify",
+                    "title": "Apply edits and verify",
+                    "description": "Apply guarded edits to up to 16 files, then run up to 8 verification commands and return a bounded git diff in one MCP call. Stops immediately on an edit failure; verification stops on the first failed command by default.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "changes": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 16,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": { "type": "string", "minLength": 1 },
+                                        "edits": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "items": {
+                                                "oneOf": [
+                                                    {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "type": { "type": "string", "const": "replace" },
+                                                            "old_string": { "type": "string" },
+                                                            "new_string": { "type": "string" },
+                                                            "replace_all": { "type": "boolean" }
+                                                        },
+                                                        "required": ["type", "old_string", "new_string"]
+                                                    },
+                                                    {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "type": { "type": "string", "const": "range" },
+                                                            "start_line": { "type": "integer", "minimum": 1 },
+                                                            "end_line": { "type": "integer", "minimum": 1 },
+                                                            "old_text": { "type": "string" },
+                                                            "new_text": { "type": "string" }
+                                                        },
+                                                        "required": ["type", "start_line", "end_line", "old_text", "new_text"]
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    },
+                                    "required": ["path", "edits"]
+                                }
+                            },
+                            "verify_commands": {
+                                "type": "array",
+                                "maxItems": 8,
+                                "items": { "type": "string", "minLength": 1 }
+                            },
+                            "cwd": { "type": "string" },
+                            "timeout": { "type": "integer", "minimum": 1, "maximum": command::MAX_TIMEOUT_MS },
+                            "stop_on_error": { "type": "boolean", "default": true }
+                        },
+                        "required": ["changes"]
+                    },
+                    "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+                }));
+            }
             tools.push(json!({
                 "name": "patch_begin",
                 "title": "Begin large patch",
@@ -1468,7 +1729,7 @@ async fn handle_tools_list_with_show_detail_mode(
         tools.push(catdesk_instruction_tool_descriptor());
     }
 
-    // Browser tools — get from devtools bridge
+    // Browser tools вЂ” get from devtools bridge
     if mode.browser_enabled() {
         if let Some(bridge) = devtools {
             if let Some(dt_tools) = fetch_devtools_tools(bridge).await {
@@ -1489,7 +1750,7 @@ async fn handle_tools_list_with_show_detail_mode(
     JsonRpcResponse::success(req.id.clone(), json!({ "tools": tools }))
 }
 
-// ── tools/call ──────────────────────────────────────────────
+// в”Ђв”Ђ tools/call в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 #[cfg(test)]
 async fn handle_tools_call(
@@ -1573,12 +1834,21 @@ async fn handle_tools_call_with_show_detail_mode(
                 }
             } else if matches!(
                 tool_name.as_str(),
-                "run_command" | "start_command" | "poll_command" | "cancel_command"
+                "run_command"
+                    | "run_script"
+                    | "run_batch"
+                    | "start_command"
+                    | "poll_command"
+                    | "cancel_command"
             ) {
                 if tool_mode.run_command_enabled() {
                     match tool_name.as_str() {
                         "run_command" => {
                             handle_run_command(req, workspace_root, set_catdesk_as_co_author).await
+                        }
+                        "run_script" => handle_run_script(req, workspace_root).await,
+                        "run_batch" => {
+                            handle_run_batch(req, workspace_root, set_catdesk_as_co_author).await
                         }
                         "start_command" => {
                             handle_start_command(
@@ -1618,6 +1888,8 @@ async fn handle_tools_call_with_show_detail_mode(
             } else {
                 match tool_name.as_str() {
                     "read" => handle_read_files(req, workspace_root),
+                    "symbol_lookup" => handle_symbol_lookup(req, workspace_root).await,
+                    "repo_snapshot" => handle_repo_snapshot(req, workspace_root).await,
                     "search" => handle_search_text(req, workspace_root).await,
                     "agent_catalog_status" => handle_agent_catalog_status(req, workspace_root),
                     "agent_route" => handle_agent_route(req, workspace_root),
@@ -1628,6 +1900,13 @@ async fn handle_tools_call_with_show_detail_mode(
                             match tool_name.as_str() {
                                 "write" => handle_write_file(req, workspace_root),
                                 "edit" => handle_edit_file(req, workspace_root),
+                                "apply_and_verify" => {
+                                    if tool_mode.run_command_enabled() {
+                                        handle_apply_and_verify(req, workspace_root).await
+                                    } else {
+                                        read_only_blocked_response(req, &tool_name)
+                                    }
+                                }
                                 "patch_begin" => handle_patch_begin(req, workspace_root),
                                 "patch_chunk" => handle_patch_chunk(req, workspace_root),
                                 "patch_apply" => handle_patch_apply(req, workspace_root),
@@ -2297,6 +2576,250 @@ async fn handle_ssh_download(req: &JsonRpcRequest, workspace_root: &str) -> Json
     }
 
     tool_success_response_with_structured(req, text, structured)
+}
+
+async fn handle_run_script(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let Some(path_arg) = arguments.get("path").and_then(Value::as_str) else {
+        return tool_error_response(req, "Missing required parameter: path".into());
+    };
+    let script = match command::resolve_workspace_path(workspace_root, Some(path_arg)) {
+        Ok(path) => path,
+        Err(error) => return tool_error_response(req, error),
+    };
+    if !script.is_file() {
+        return tool_error_response(
+            req,
+            format!("script does not exist or is not a file: {path_arg}"),
+        );
+    }
+    let ext = script
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let args = match arguments.get("args") {
+        None => Vec::new(),
+        Some(value) => {
+            let Some(items) = value.as_array() else {
+                return tool_error_response(req, "args must be an array of strings".into());
+            };
+            if items.len() > 64 {
+                return tool_error_response(req, "args supports at most 64 items".into());
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(value) = item.as_str() else {
+                    return tool_error_response(req, "args must contain only strings".into());
+                };
+                out.push(value.to_string());
+            }
+            out
+        }
+    };
+    let cwd = match command::resolve_workspace_path(
+        workspace_root,
+        arguments.get("cwd").and_then(Value::as_str),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let timeout_ms = command::clamp_timeout(arguments.get("timeout").and_then(Value::as_u64));
+    fn ps_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+    fn cmd_quote(value: &str) -> String {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    }
+    let script_text = script.to_string_lossy();
+    let command_text = match ext.as_str() {
+        "ps1" => {
+            let tail = args
+                .iter()
+                .map(|v| ps_quote(v))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("& {} {}", ps_quote(&script_text), tail)
+        }
+        "py" => {
+            let tail = args
+                .iter()
+                .map(|v| cmd_quote(v))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("python {} {}", cmd_quote(&script_text), tail)
+        }
+        "cmd" | "bat" => {
+            let tail = args
+                .iter()
+                .map(|v| cmd_quote(v))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("& {} {}", cmd_quote(&script_text), tail)
+        }
+        _ => {
+            return tool_error_response(
+                req,
+                "run_script supports only .ps1, .py, .cmd, and .bat".into(),
+            );
+        }
+    };
+    let result =
+        command::run_command(&command_text, Path::new(workspace_root), &cwd, timeout_ms).await;
+    let structured = json!({
+        "toolName":"run_script","path":path_arg,"stdout":result.stdout,"stderr":result.stderr,
+        "success":result.success,"exitCode":result.exit_code,"elapsedMs":result.elapsed_ms,"timedOut":result.timed_out,
+        "stdoutTruncated":result.stdout_truncated,"stderrTruncated":result.stderr_truncated
+    });
+    if result.success {
+        tool_success_response_with_structured(req, String::new(), structured)
+    } else {
+        tool_error_response_with_structured(req, String::new(), structured)
+    }
+}
+
+async fn handle_run_batch(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    set_catdesk_as_co_author: bool,
+) -> JsonRpcResponse {
+    let params = &req.params;
+    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+    let commands = match arguments.get("commands").and_then(Value::as_array) {
+        Some(values) if !values.is_empty() && values.len() <= 32 => {
+            let mut commands = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(command) = value.as_str() else {
+                    return tool_error_response(req, "commands must contain only strings".into());
+                };
+                if command.trim().is_empty() {
+                    return tool_error_response(
+                        req,
+                        "commands must not contain empty strings".into(),
+                    );
+                }
+                commands.push(command.to_string());
+            }
+            commands
+        }
+        Some(_) => {
+            return tool_error_response(req, "commands must contain between 1 and 32 items".into());
+        }
+        None => {
+            return tool_error_response(req, "Missing required parameter: commands".into());
+        }
+    };
+
+    let cwd_input = arguments.get("cwd").and_then(Value::as_str);
+    let timeout_ms = arguments.get("timeout").and_then(Value::as_u64);
+    if let Some(timeout_ms) = timeout_ms {
+        if timeout_ms == 0 || timeout_ms > command::MAX_TIMEOUT_MS {
+            return tool_error_response(
+                req,
+                format!(
+                    "run_batch timeout must be between 1 and {} ms per command",
+                    command::MAX_TIMEOUT_MS
+                ),
+            );
+        }
+    }
+    let stop_on_error = arguments
+        .get("stop_on_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let cwd = match command::resolve_workspace_path(workspace_root, cwd_input) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let effective_timeout = command::clamp_timeout(timeout_ms);
+
+    let started = std::time::Instant::now();
+    let mut results = Vec::with_capacity(commands.len());
+    let mut text = String::new();
+    let mut overall_success = true;
+
+    for (index, original) in commands.iter().enumerate() {
+        if command::contains_catdesk_co_author_marker(original) {
+            return tool_error_response(
+                req,
+                "Do not include \"Co-Authored-By: CatDesk\" in run_batch commands.".into(),
+            );
+        }
+        let effective_command =
+            if set_catdesk_as_co_author && command::command_contains_git_commit(original) {
+                command::inject_catdesk_co_author_trailer(original)
+            } else {
+                original.clone()
+            };
+
+        let result = command::run_command(
+            &effective_command,
+            Path::new(workspace_root),
+            &cwd,
+            effective_timeout,
+        )
+        .await;
+
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&format!(
+            "$ {}\n{}",
+            effective_command,
+            command::format_result(&result)
+        ));
+
+        results.push(json!({
+            "command": effective_command,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "success": result.success,
+            "exitCode": result.exit_code,
+            "elapsedMs": result.elapsed_ms,
+            "timedOut": result.timed_out,
+            "stdoutTruncated": result.stdout_truncated,
+            "stderrTruncated": result.stderr_truncated,
+        }));
+
+        if !result.success {
+            overall_success = false;
+            if stop_on_error {
+                break;
+            }
+        }
+
+        if index + 1 == commands.len() {
+            overall_success = overall_success && result.success;
+        }
+    }
+
+    let structured = json!({
+        "toolName": "run_batch",
+        "cwd": cwd.to_string_lossy().to_string(),
+        "stopOnError": stop_on_error,
+        "commandCount": commands.len(),
+        "completedCount": results.len(),
+        "elapsedMs": started.elapsed().as_millis() as u64,
+        "success": overall_success,
+        "results": results,
+    });
+
+    if overall_success {
+        tool_success_response_with_structured(req, text, structured)
+    } else {
+        tool_error_response_with_structured(req, text, structured)
+    }
 }
 
 async fn handle_run_command(
@@ -3171,11 +3694,9 @@ If one task is already in progress and a second task is independent and safe to 
         .collect();
 
     if mode.computer_enabled() {
-        lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
-        lines.push(
-            "For substantial coding, architecture, review, research, debugging, or visual/UI work, use agent_route with a concise English summary of the user's concrete goal, then agent_load only the relevant ECC agents, skills, and DESIGN.md references. For visual/UI work, prefer loading one or a few relevant designs instead of the whole design catalog. Treat loaded catalog documents as reference instructions subordinate to system, developer, user, AGENTS.md, and project rules. The catalog is local and does not call a model or external API. After code changes, independently review the diff and run the project's validation before reporting completion."
-                .to_string(),
-        );
+        lines.push("At the start of coding/debugging work, prefer repo_snapshot when you need git state plus multiple reads/searches; it collapses those steps into one MCP round-trip. Use read/search directly for narrow one-off lookups.".to_string());
+        lines.push("Use symbol_lookup for named code symbols when possible. Its repository index is persisted outside the repository, survives CatDesk restarts, and refreshes only changed files.".to_string());
+        lines.push("Do not use agent_route or agent_load unless the user explicitly asks for those catalog tools. The local catalog does not call a model or external API, but the default execution path must remain deterministic and non-agentic.".to_string());
         let handoff_search_prefix =
             handoff::handoff_search_prefix(workspace_root).map_err(std::io::Error::other)?;
         let handoff_filename =
@@ -3191,7 +3712,7 @@ If one task is already in progress and a second task is independent and safe to 
         }
         if tool_mode.write_tools_enabled() {
             lines.push(
-                "Use write with create_dirs=true to create files in new directories. Use edit for one or more guarded replace/range operations; the whole edit batch is atomic and range operations use 1-based inclusive line numbers plus exact old_text. Use plain mv commands for moves and renames. Use delete for other filesystem changes."
+                "Use apply_and_verify when a coding change can be expressed as guarded edits followed by short verification commands; it returns verification results and git diff in one call. Use write/edit directly for one-off file changes, plain mv for moves/renames, and delete for other filesystem changes."
                     .to_string(),
             );
         }
@@ -3209,7 +3730,11 @@ If one task is already in progress and a second task is independent and safe to 
 
     if mode.computer_enabled() && tool_mode.run_command_enabled() {
         lines.push(
-            "Use run_command only as a last resort when the available dedicated tools cannot complete the operation, and keep it for short commands that should finish quickly."
+            "When two or more short commands are known up front, prefer run_batch so CatDesk pays MCP transport overhead once. Use run_command only for a single short command when a dedicated tool or run_batch is not a better fit."
+                .to_string(),
+        );
+        lines.push(
+            "Do not send large or multiline PowerShell/Python/CMD bodies inside run_command. Write them to a workspace script and use run_script so complex quoting and payload size cannot trigger MCP INVALID_ARGUMENT before CatDesk receives the command."
                 .to_string(),
         );
         lines.push(
@@ -4410,6 +4935,346 @@ fn handle_read_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
     }
 }
 
+async fn handle_symbol_lookup(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let cwd = match command::resolve_workspace_path(
+        workspace_root,
+        arguments.get("cwd").and_then(Value::as_str),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let Some(values) = arguments.get("names").and_then(Value::as_array) else {
+        return tool_error_response(req, "names must be a non-empty array of strings".into());
+    };
+    if values.is_empty() || values.len() > 32 {
+        return tool_error_response(req, "names must contain between 1 and 32 items".into());
+    }
+    let mut names = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(name) = value.as_str() else {
+            return tool_error_response(req, "names must contain only strings".into());
+        };
+        if name.trim().is_empty() {
+            return tool_error_response(req, "names must not contain empty strings".into());
+        }
+        names.push(name.to_string());
+    }
+    let refresh = arguments
+        .get("refresh")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let result = tokio::task::spawn_blocking(move || {
+        crate::repo_index::lookup_cached(&cwd, &names, refresh)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(result)) => tool_success_response_with_structured(
+            req,
+            String::new(),
+            json!({
+                "toolName": "symbol_lookup",
+                "success": true,
+                "cached": result.cached,
+                "diskLoaded": result.disk_loaded,
+                "refreshedFiles": result.refreshed_files,
+                "fileCount": result.file_count,
+                "symbolCount": result.symbol_count,
+                "buildMs": result.build_ms,
+                "lookupMs": result.lookup_ms,
+                "hits": result.hits,
+            }),
+        ),
+        Ok(Err(error)) => tool_error_response(req, error),
+        Err(error) => tool_error_response(
+            req,
+            format!("code: SYMBOL_INDEX_WORKER_FAILED\nmessage: {error}"),
+        ),
+    }
+}
+
+async fn handle_repo_snapshot(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let args = tool_arguments(req);
+    let started = std::time::Instant::now();
+    let cwd = match command::resolve_workspace_path(
+        workspace_root,
+        args.get("cwd").and_then(Value::as_str),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+
+    let git_commands = [
+        "git status --short",
+        "git branch --show-current",
+        "git rev-parse --short HEAD",
+        "git log --oneline -n 5",
+    ];
+    let mut git = Map::new();
+    for (key, command_text) in [
+        ("status", git_commands[0]),
+        ("branch", git_commands[1]),
+        ("head", git_commands[2]),
+        ("recentCommits", git_commands[3]),
+    ] {
+        let result =
+            command::run_command(command_text, Path::new(workspace_root), &cwd, 5_000).await;
+        git.insert(
+            key.to_string(),
+            json!({
+                "success": result.success,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "elapsedMs": result.elapsed_ms,
+            }),
+        );
+    }
+
+    let paths = match args.get("paths") {
+        None => Vec::new(),
+        Some(value) => {
+            let Some(items) = value.as_array() else {
+                return tool_error_response(req, "paths must be an array of strings".into());
+            };
+            if items.len() > workspace_tools::MAX_READ_BATCH_FILES {
+                return tool_error_response(req, "too many paths for repo_snapshot".into());
+            }
+            let mut paths = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(path) = item.as_str() else {
+                    return tool_error_response(req, "paths must contain only strings".into());
+                };
+                paths.push(path.to_string());
+            }
+            paths
+        }
+    };
+
+    let read = if paths.is_empty() {
+        json!({"fileCount":0,"bytes":0,"lineCount":0,"batchTruncated":false,"files":[]})
+    } else {
+        match workspace_tools::read_files(workspace_root, &paths) {
+            Ok(output) => json!({
+                "fileCount": output.files.len(),
+                "bytes": output.total_bytes,
+                "lineCount": output.total_line_count,
+                "batchTruncated": output.batch_truncated,
+                "files": output.files,
+            }),
+            Err(error) => return tool_error_response(req, error),
+        }
+    };
+
+    let search_values = match args.get("searches") {
+        None => Vec::new(),
+        Some(value) => {
+            let Some(items) = value.as_array() else {
+                return tool_error_response(req, "searches must be an array".into());
+            };
+            if items.len() > 8 {
+                return tool_error_response(
+                    req,
+                    "repo_snapshot supports at most 8 searches".into(),
+                );
+            }
+            items.clone()
+        }
+    };
+    let mut searches = Vec::with_capacity(search_values.len());
+    for value in search_values {
+        let request = match serde_json::from_value::<crate::bounded_search::Request>(value) {
+            Ok(request) => request,
+            Err(error) => {
+                return tool_error_response(
+                    req,
+                    format!("code: INVALID_SEARCH_ARGUMENTS\nmessage: {error}"),
+                );
+            }
+        };
+        match crate::bounded_search::search(workspace_root.to_owned(), request).await {
+            Ok(value) => searches.push(value),
+            Err(error) => return tool_error_response(req, error),
+        }
+    }
+
+    tool_success_response_with_structured(
+        req,
+        String::new(),
+        json!({
+            "toolName": "repo_snapshot",
+            "elapsedMs": started.elapsed().as_millis() as u64,
+            "git": git,
+            "read": read,
+            "searches": searches,
+        }),
+    )
+}
+
+async fn handle_apply_and_verify(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let args = tool_arguments(req);
+    let started = std::time::Instant::now();
+    let Some(changes) = args.get("changes").and_then(Value::as_array) else {
+        return tool_error_response(req, "changes must be a non-empty array".into());
+    };
+    if changes.is_empty() || changes.len() > 16 {
+        return tool_error_response(req, "changes must contain between 1 and 16 items".into());
+    }
+
+    let mut edit_results = Vec::with_capacity(changes.len());
+    for change in changes {
+        let Some(path) = change.get("path").and_then(Value::as_str) else {
+            return tool_error_response(req, "each change requires string path".into());
+        };
+        let operations = match parse_edit_operations(change) {
+            Ok(operations) => operations,
+            Err(error) => return tool_error_response(req, error),
+        };
+        match workspace_tools::edit_file(workspace_root, path, &operations) {
+            Ok(output) => {
+                crate::repo_index::invalidate_changed_path(workspace_root, path);
+                edit_results.push(json!({
+                    "path": output.path,
+                    "operationCount": output.operation_count,
+                    "appliedOperations": output.applied_operations,
+                    "replacedOccurrences": output.replaced_occurrences,
+                    "bytesWritten": output.bytes_written,
+                    "success": true,
+                }));
+            }
+            Err(error) => {
+                return tool_error_response_with_structured(
+                    req,
+                    error.clone(),
+                    json!({
+                        "toolName": "apply_and_verify",
+                        "success": false,
+                        "elapsedMs": started.elapsed().as_millis() as u64,
+                        "edits": edit_results,
+                        "verification": [],
+                        "diff": {},
+                        "message": error,
+                    }),
+                );
+            }
+        }
+    }
+
+    let cwd = match command::resolve_workspace_path(
+        workspace_root,
+        args.get("cwd").and_then(Value::as_str),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let timeout = command::clamp_timeout(args.get("timeout").and_then(Value::as_u64));
+    let stop_on_error = args
+        .get("stop_on_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let verify_commands = match args.get("verify_commands") {
+        None => Vec::new(),
+        Some(value) => {
+            let Some(items) = value.as_array() else {
+                return tool_error_response(req, "verify_commands must be an array".into());
+            };
+            if items.len() > 8 {
+                return tool_error_response(
+                    req,
+                    "apply_and_verify supports at most 8 verification commands".into(),
+                );
+            }
+            let mut commands = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(command) = item.as_str() else {
+                    return tool_error_response(
+                        req,
+                        "verify_commands must contain only strings".into(),
+                    );
+                };
+                if command.trim().is_empty() {
+                    return tool_error_response(
+                        req,
+                        "verify_commands must not contain empty strings".into(),
+                    );
+                }
+                commands.push(command.to_string());
+            }
+            commands
+        }
+    };
+
+    let mut verification = Vec::with_capacity(verify_commands.len());
+    let mut overall_success = true;
+    for command_text in verify_commands {
+        let result =
+            command::run_command(&command_text, Path::new(workspace_root), &cwd, timeout).await;
+        verification.push(json!({
+            "command": command_text,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "success": result.success,
+            "exitCode": result.exit_code,
+            "elapsedMs": result.elapsed_ms,
+            "timedOut": result.timed_out,
+            "stdoutTruncated": result.stdout_truncated,
+            "stderrTruncated": result.stderr_truncated,
+        }));
+        if !result.success {
+            overall_success = false;
+            if stop_on_error {
+                break;
+            }
+        }
+    }
+
+    let diff_result = command::run_command(
+        "git diff --no-ext-diff --unified=3",
+        Path::new(workspace_root),
+        &cwd,
+        10_000,
+    )
+    .await;
+    let diff = json!({
+        "success": diff_result.success,
+        "stdout": diff_result.stdout,
+        "stderr": diff_result.stderr,
+        "elapsedMs": diff_result.elapsed_ms,
+        "stdoutTruncated": diff_result.stdout_truncated,
+        "stderrTruncated": diff_result.stderr_truncated,
+    });
+
+    let structured = json!({
+        "toolName": "apply_and_verify",
+        "success": overall_success,
+        "elapsedMs": started.elapsed().as_millis() as u64,
+        "edits": edit_results,
+        "verification": verification,
+        "diff": diff,
+    });
+    if overall_success {
+        tool_success_response_with_structured(req, String::new(), structured)
+    } else {
+        tool_error_response_with_structured(req, "verification failed".into(), structured)
+    }
+}
+
 fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let path = match arguments.get("path").and_then(|v| v.as_str()) {
@@ -4426,6 +5291,7 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         .unwrap_or(false);
     match workspace_tools::write_file(workspace_root, path, content, create_dirs) {
         Ok(text) => {
+            crate::repo_index::invalidate_changed_path(workspace_root, path);
             let message = text.clone();
             tool_success_response_with_structured(
                 req,
@@ -4884,6 +5750,7 @@ fn handle_edit_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
     };
     match workspace_tools::edit_file(workspace_root, path, &operations) {
         Ok(output) => {
+            crate::repo_index::invalidate_changed_path(workspace_root, path);
             let text = output.render_text();
             let message = text.clone();
             tool_success_response_with_structured(
@@ -5660,6 +6527,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_script_executes_multiline_workspace_script_without_inline_payload() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-script-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let script = workspace_root.join("payload.ps1");
+        std::fs::write(
+            &script,
+            "$x = 'quoted value';\nWrite-Output $x\nWrite-Output 'done'\n",
+        )
+        .expect("write script");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(
+            "run_script",
+            json!({
+                "path": "payload.ps1",
+                "timeout": 10_000
+            }),
+        );
+        let response = handle_run_script(&req, &workspace_root_str).await;
+        let result = response.result.as_ref().expect("missing result");
+        assert!(
+            result.get("isError").is_none(),
+            "unexpected error: {result}"
+        );
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("success").and_then(Value::as_bool),
+            Some(true)
+        );
+        let stdout = structured
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(stdout.contains("quoted value"));
+        assert!(stdout.contains("done"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn symbol_lookup_uses_cached_index_and_returns_context() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-symbol-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join("src")).expect("create workspace");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace_root)
+            .args(["init", "-q"])
+            .status()
+            .expect("git init");
+        std::fs::write(
+            workspace_root.join("src/sample.ts"),
+            "export function usefulThing() {\n  return 42;\n}\n",
+        )
+        .expect("write sample");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(
+            "symbol_lookup",
+            json!({"names":["usefulThing"], "refresh": true}),
+        );
+        let first = handle_symbol_lookup(&req, &workspace_root_str).await;
+        let result = first.result.as_ref().expect("missing result");
+        assert!(
+            result.get("isError").is_none(),
+            "unexpected error: {result}"
+        );
+        let structured = result.get("structuredContent").expect("missing structured");
+        assert_eq!(
+            structured.get("cached").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(structured.to_string().contains("return 42"));
+        let req2 = tool_call_request("symbol_lookup", json!({"names":["usefulThing"]}));
+        let second = handle_symbol_lookup(&req2, &workspace_root_str).await;
+        let structured2 = second
+            .result
+            .as_ref()
+            .and_then(|r| r.get("structuredContent"))
+            .expect("missing structured2");
+        assert_eq!(
+            structured2.get("cached").and_then(Value::as_bool),
+            Some(true)
+        );
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn repo_snapshot_combines_git_read_and_search_in_one_call() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-repo-snapshot-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(
+            workspace_root.join("sample.txt"),
+            "alpha needle omega\nsecond line\n",
+        )
+        .expect("write sample");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(
+            "repo_snapshot",
+            json!({
+                "paths": ["sample.txt"],
+                "searches": [{
+                    "pattern": "needle",
+                    "path": ".",
+                    "fixed_strings": true,
+                    "max_matches": 10
+                }]
+            }),
+        );
+        let response = handle_repo_snapshot(&req, &workspace_root_str).await;
+        let result = response.result.as_ref().expect("missing result");
+        assert!(
+            result.get("isError").is_none(),
+            "unexpected error: {result}"
+        );
+        let structured = result.get("structuredContent").expect("missing structured");
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("repo_snapshot")
+        );
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn apply_and_verify_edits_then_runs_verification_inside_one_call() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-apply-verify-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("sample.txt"), "before\n").expect("write sample");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let verify = if cfg!(windows) {
+            "if ((Get-Content sample.txt -Raw).Trim() -eq 'after') { exit 0 } else { exit 1 }"
+        } else {
+            "test \"$(cat sample.txt)\" = after"
+        };
+        let req = tool_call_request(
+            "apply_and_verify",
+            json!({
+                "changes": [{
+                    "path": "sample.txt",
+                    "edits": [{
+                        "type": "replace",
+                        "old_string": "before",
+                        "new_string": "after"
+                    }]
+                }],
+                "verify_commands": [verify],
+                "timeout": 10_000
+            }),
+        );
+        let response = handle_apply_and_verify(&req, &workspace_root_str).await;
+        let result = response.result.as_ref().expect("missing result");
+        assert!(
+            result.get("isError").is_none(),
+            "unexpected error: {result}"
+        );
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
     async fn run_command_rejects_long_timeout_and_points_to_start_command() {
         let workspace_root =
             std::env::temp_dir().join(format!("catdesk-mcp-run-timeout-{}", Uuid::new_v4()));
@@ -5789,6 +6817,8 @@ mod tests {
             names,
             vec![
                 "run_command",
+                "run_script",
+                "run_batch",
                 "start_command",
                 "poll_command",
                 "cancel_command",
@@ -5805,12 +6835,15 @@ mod tests {
                 "key_press",
                 "catdesk_instruction",
                 "read",
+                "symbol_lookup",
+                "repo_snapshot",
                 "search",
                 "agent_catalog_status",
                 "agent_route",
                 "agent_load",
                 "write",
                 "edit",
+                "apply_and_verify",
                 "patch_begin",
                 "patch_chunk",
                 "patch_apply",
@@ -6190,6 +7223,8 @@ mod tests {
                 "ui_tree",
                 "catdesk_instruction",
                 "read",
+                "symbol_lookup",
+                "repo_snapshot",
                 "search",
                 "agent_catalog_status",
                 "agent_route",

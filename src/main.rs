@@ -16,6 +16,7 @@ mod mcp;
 mod ngrok;
 mod patch_transport;
 mod process_runner;
+mod repo_index;
 mod server;
 mod ssh_remote;
 mod startup;
@@ -1651,14 +1652,19 @@ async fn run_app(
         }
     }
 
-    let continue_run = run_ngrok_auth_setup(terminal, state.clone()).await?;
-    if !continue_run {
-        return Ok(());
-    }
+    let disable_ngrok = std::env::var("CATDESK_DISABLE_NGROK")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    if !disable_ngrok {
+        let continue_run = run_ngrok_auth_setup(terminal, state.clone()).await?;
+        if !continue_run {
+            return Ok(());
+        }
 
-    let continue_run = run_ngrok_domain_setup(terminal, state.clone()).await?;
-    if !continue_run {
-        return Ok(());
+        let continue_run = run_ngrok_domain_setup(terminal, state.clone()).await?;
+        if !continue_run {
+            return Ok(());
+        }
     }
 
     // Start services
