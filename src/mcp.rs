@@ -1310,7 +1310,7 @@ async fn handle_tools_list_with_show_detail_mode(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "The shell command to start" },
+                        "command": { "type": "string", "minLength": 1, "maxLength": MAX_INLINE_COMMAND_CHARS, "description": "One short single-line command to start. For multiline or large scripts, write a workspace script and call run_script(path)." },
                         "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it" },
                         "timeout": {
                             "type": "integer",
@@ -2191,6 +2191,20 @@ async fn handle_start_command(
         Ok(value) => value,
         Err(error) => return tool_error_response(req, error),
     };
+    if command_text.chars().count() > MAX_INLINE_COMMAND_CHARS {
+        return tool_error_response(
+            req,
+            format!(
+                "code: COMMAND_PAYLOAD_TOO_LARGE\nmessage: start_command accepts at most {MAX_INLINE_COMMAND_CHARS} characters. Write the script to a workspace .ps1/.py/.cmd/.bat file and call run_script(path)."
+            ),
+        );
+    }
+    if command_text.contains('\n') || command_text.contains('\r') {
+        return tool_error_response(
+            req,
+            "code: COMMAND_MULTILINE_REQUIRES_RUN_SCRIPT\nmessage: start_command accepts only a single-line command. Write multiline content to a workspace script and call run_script(path).".into(),
+        );
+    }
     if command::contains_catdesk_co_author_marker(command_text) {
         let message = if set_catdesk_as_co_author {
             "Rewrite the commit message normally and remove \"Co-Authored-By: CatDesk\". CatDesk will add that trailer automatically."
@@ -3767,7 +3781,7 @@ If one task is already in progress and a second task is independent and safe to 
                 .to_string(),
         );
         lines.push(
-            "For builds, compilation, dependency installation, long-running test suites, development servers, or commands that may take more than about one minute, use start_command instead of keeping run_command open."
+            "For builds, compilation, dependency installation, long-running test suites, development servers, or commands that may take more than about one minute, use start_command with a short single-line launcher. For multiline or large setup logic, write a script file and use run_script instead."
                 .to_string(),
         );
         lines.push(
@@ -6806,6 +6820,17 @@ mod tests {
             .expect("missing run_command");
         assert_eq!(
             run_command
+                .pointer("/inputSchema/properties/command/maxLength")
+                .and_then(Value::as_u64),
+            Some(MAX_INLINE_COMMAND_CHARS as u64)
+        );
+
+        let start_command = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("start_command"))
+            .expect("missing start_command");
+        assert_eq!(
+            start_command
                 .pointer("/inputSchema/properties/command/maxLength")
                 .and_then(Value::as_u64),
             Some(MAX_INLINE_COMMAND_CHARS as u64)
