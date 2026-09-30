@@ -30,6 +30,7 @@ use crate::workspace_tools;
 const SERVER_NAME: &str = "catdesk";
 const SERVER_VERSION: &str = "4.0.0";
 pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+const MAX_INLINE_COMMAND_CHARS: usize = 1024;
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
 const WIDGET_RESOURCE_REVISION: u32 = 6;
@@ -1240,7 +1241,7 @@ async fn handle_tools_list_with_show_detail_mode(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "The shell command to execute" },
+                        "command": { "type": "string", "minLength": 1, "maxLength": MAX_INLINE_COMMAND_CHARS, "description": "One short single-line shell command. For multiline or large scripts, write a .ps1/.py/.cmd/.bat file and call run_script(path)." },
                         "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it" },
                         "timeout": {
                             "type": "integer",
@@ -1264,7 +1265,7 @@ async fn handle_tools_list_with_show_detail_mode(
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "minLength": 1 },
-                        "args": { "type": "array", "maxItems": 64, "items": { "type": "string" } },
+                        "args": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 4096 } },
                         "cwd": { "type": "string" },
                         "timeout": { "type": "integer", "minimum": 1, "maximum": command::MAX_TIMEOUT_MS }
                     },
@@ -1283,8 +1284,8 @@ async fn handle_tools_list_with_show_detail_mode(
                             "type": "array",
                             "minItems": 1,
                             "maxItems": 32,
-                            "items": { "type": "string", "minLength": 1 },
-                            "description": "Short shell commands to execute sequentially."
+                            "items": { "type": "string", "minLength": 1, "maxLength": MAX_INLINE_COMMAND_CHARS },
+                            "description": "Short single-line shell commands to execute sequentially. Use run_script for multiline or large scripts."
                         },
                         "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it." },
                         "timeout": {
@@ -2703,6 +2704,20 @@ async fn handle_run_batch(
                         "commands must not contain empty strings".into(),
                     );
                 }
+                if command.chars().count() > MAX_INLINE_COMMAND_CHARS {
+                    return tool_error_response(
+                        req,
+                        format!(
+                            "code: COMMAND_PAYLOAD_TOO_LARGE\nmessage: each run_batch command accepts at most {MAX_INLINE_COMMAND_CHARS} characters. Use run_script for multiline or large scripts."
+                        ),
+                    );
+                }
+                if command.contains('\n') || command.contains('\r') {
+                    return tool_error_response(
+                        req,
+                        "code: COMMAND_MULTILINE_REQUIRES_RUN_SCRIPT\nmessage: run_batch accepts only single-line commands. Use run_script for multiline scripts.".into(),
+                    );
+                }
                 commands.push(command.to_string());
             }
             commands
@@ -2835,6 +2850,20 @@ async fn handle_run_command(
             return tool_error_response(req, "Missing required parameter: command".into());
         }
     };
+    if cmd.chars().count() > MAX_INLINE_COMMAND_CHARS {
+        return tool_error_response(
+            req,
+            format!(
+                "code: COMMAND_PAYLOAD_TOO_LARGE\nmessage: run_command accepts at most {MAX_INLINE_COMMAND_CHARS} characters. Write the script to a workspace .ps1/.py/.cmd/.bat file and call run_script(path)."
+            ),
+        );
+    }
+    if cmd.contains('\n') || cmd.contains('\r') {
+        return tool_error_response(
+            req,
+            "code: COMMAND_MULTILINE_REQUIRES_RUN_SCRIPT\nmessage: run_command accepts only a single-line command. Write multiline content to a workspace script and call run_script(path).".into(),
+        );
+    }
 
     let cwd_input = arguments.get("cwd").and_then(|v| v.as_str());
     let timeout_ms = arguments.get("timeout").and_then(|v| v.as_u64());
@@ -6527,6 +6556,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_command_rejects_large_or_multiline_payloads_with_run_script_guidance() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-inline-limit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let large_req = tool_call_request(
+            "run_command",
+            json!({"command": "x".repeat(MAX_INLINE_COMMAND_CHARS + 1)}),
+        );
+        let large = handle_run_command(&large_req, &workspace_root_str, false).await;
+        let large_text = result_text(&large);
+        assert!(large_text.contains("COMMAND_PAYLOAD_TOO_LARGE"));
+        assert!(large_text.contains("run_script"));
+
+        let multiline_req = tool_call_request(
+            "run_command",
+            json!({"command": "Write-Output one\nWrite-Output two"}),
+        );
+        let multiline = handle_run_command(&multiline_req, &workspace_root_str, false).await;
+        let multiline_text = result_text(&multiline);
+        assert!(multiline_text.contains("COMMAND_MULTILINE_REQUIRES_RUN_SCRIPT"));
+        assert!(multiline_text.contains("run_script"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_script_executes_large_script_file_without_inline_command_payload() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-large-script-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let script = workspace_root.join("large.ps1");
+        let padding = "# padding payload\n".repeat(8_000);
+        std::fs::write(
+            &script,
+            format!("{padding}\nWrite-Output 'CATDESK_LARGE_SCRIPT_OK'\n"),
+        )
+        .expect("write large script");
+        assert!(std::fs::metadata(&script).unwrap().len() > 100_000);
+
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(
+            "run_script",
+            json!({"path": "large.ps1", "timeout": 30_000}),
+        );
+        let response = handle_run_script(&req, &workspace_root_str).await;
+        let result = response.result.as_ref().expect("missing result");
+        assert!(
+            result.get("isError").is_none(),
+            "unexpected error: {result}"
+        );
+        let structured = result.get("structuredContent").expect("missing structured");
+        assert_eq!(
+            structured.get("success").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            structured
+                .get("stdout")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("CATDESK_LARGE_SCRIPT_OK")
+        );
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
     async fn run_script_executes_multiline_workspace_script_without_inline_payload() {
         let workspace_root =
             std::env::temp_dir().join(format!("catdesk-mcp-run-script-{}", Uuid::new_v4()));
@@ -6685,6 +6782,45 @@ mod tests {
             "unexpected error: {result}"
         );
         let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn command_tool_schemas_bound_inline_payloads_and_expose_run_script() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-command-schemas")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let tools = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools");
+
+        let run_command = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("run_command"))
+            .expect("missing run_command");
+        assert_eq!(
+            run_command
+                .pointer("/inputSchema/properties/command/maxLength")
+                .and_then(Value::as_u64),
+            Some(MAX_INLINE_COMMAND_CHARS as u64)
+        );
+
+        let run_script = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("run_script"))
+            .expect("missing run_script");
+        assert_eq!(
+            run_script
+                .pointer("/inputSchema/required/0")
+                .and_then(Value::as_str),
+            Some("path")
+        );
     }
 
     #[tokio::test]
