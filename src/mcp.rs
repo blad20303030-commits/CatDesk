@@ -1264,9 +1264,9 @@ async fn handle_tools_list_with_show_detail_mode(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "minLength": 1 },
+                        "path": { "type": "string", "minLength": 1, "description": "Script path. Relative paths are resolved from cwd when provided, otherwise from workspace root." },
                         "args": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 4096 } },
-                        "cwd": { "type": "string" },
+                        "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it." },
                         "timeout": { "type": "integer", "minimum": 1, "maximum": command::MAX_TIMEOUT_MS }
                     },
                     "required": ["path"]
@@ -1479,7 +1479,7 @@ async fn handle_tools_list_with_show_detail_mode(
                         "type": "array",
                         "maxItems": 32,
                         "items": { "type": "string", "minLength": 1 },
-                        "description": "Files to read in one batch."
+                        "description": "Files to read in one batch. Relative paths are resolved from cwd."
                     },
                     "searches": {
                         "type": "array",
@@ -1488,7 +1488,7 @@ async fn handle_tools_list_with_show_detail_mode(
                             "type": "object",
                             "properties": {
                                 "pattern": { "type": "string", "minLength": 1 },
-                                "path": { "type": "string" },
+                                "path": { "type": "string", "description": "Search path relative to cwd, or an absolute path inside cwd." },
                                 "glob": { "type": "string" },
                                 "fixed_strings": { "type": "boolean" },
                                 "case_insensitive": { "type": "boolean" },
@@ -1958,12 +1958,7 @@ async fn handle_tools_call_with_show_detail_mode(
             }
         }
     }
-    let is_error = response
-        .result
-        .as_ref()
-        .and_then(|v| v.get("isError"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let is_error = response.result.as_ref().is_some_and(tool_result_failed);
     let has_turn_changes = !turn_files.is_empty();
     let widget_context = AutoWidgetContext {
         is_error,
@@ -2598,9 +2593,26 @@ async fn handle_run_script(req: &JsonRpcRequest, workspace_root: &str) -> JsonRp
     let Some(path_arg) = arguments.get("path").and_then(Value::as_str) else {
         return tool_error_response(req, "Missing required parameter: path".into());
     };
-    let script = match command::resolve_workspace_path(workspace_root, Some(path_arg)) {
+    let cwd = match command::resolve_workspace_path(
+        workspace_root,
+        arguments.get("cwd").and_then(Value::as_str),
+    ) {
         Ok(path) => path,
-        Err(error) => return tool_error_response(req, error),
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let script = match command::resolve_command_path(workspace_root, &cwd, Some(path_arg)) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
     };
     if !script.is_file() {
         return tool_error_response(
@@ -2630,18 +2642,6 @@ async fn handle_run_script(req: &JsonRpcRequest, workspace_root: &str) -> JsonRp
                 out.push(value.to_string());
             }
             out
-        }
-    };
-    let cwd = match command::resolve_workspace_path(
-        workspace_root,
-        arguments.get("cwd").and_then(Value::as_str),
-    ) {
-        Ok(path) => path,
-        Err(error) => {
-            return tool_error_response(
-                req,
-                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
-            );
         }
     };
     let timeout_ms = command::clamp_timeout(arguments.get("timeout").and_then(Value::as_u64));
@@ -3437,22 +3437,77 @@ fn handle_desktop_tool(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse
     }
 }
 
+fn tool_failure_text(text: &str, structured: &Value) -> String {
+    let text = text.trim();
+    if !text.is_empty() {
+        return text.to_string();
+    }
+    for field in ["message", "stderr", "stdout"] {
+        if let Some(value) = structured
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return value.to_string();
+        }
+    }
+    if let Some(error_code) = structured
+        .get("errorCode")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("Tool failed: {error_code}");
+    }
+    if let Some(exit_code) = structured.get("exitCode").and_then(Value::as_i64) {
+        return format!("Tool failed with exit code {exit_code}");
+    }
+    "Tool execution failed".to_string()
+}
+
+fn tool_result_failed(result: &Value) -> bool {
+    result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || result
+            .get("structuredContent")
+            .and_then(|structured| structured.get("success"))
+            .and_then(Value::as_bool)
+            .is_some_and(|success| !success)
+}
+
 fn tool_response(
     req: &JsonRpcRequest,
     text: String,
     structured: Option<Value>,
-    is_error: bool,
+    failed: bool,
 ) -> JsonRpcResponse {
-    let mut result = json!({
-        "content": []
-    });
-    if let Some(obj) = result.as_object_mut() {
-        let structured = structured.unwrap_or_else(|| tool_message_structured(req, text, is_error));
-        obj.insert("structuredContent".to_string(), structured);
-        if is_error {
-            obj.insert("isError".to_string(), Value::Bool(true));
+    let mut structured =
+        structured.unwrap_or_else(|| tool_message_structured(req, text.clone(), failed));
+    if failed {
+        if let Some(structured_obj) = structured.as_object_mut() {
+            structured_obj
+                .entry("success".to_string())
+                .or_insert(Value::Bool(false));
         }
     }
+    let content = if failed {
+        vec![json!({
+            "type": "text",
+            "text": tool_failure_text(&text, &structured),
+        })]
+    } else {
+        Vec::new()
+    };
+    let result = json!({
+        "content": content,
+        "structuredContent": structured,
+    });
+
+    // OpenAI-hosted MCP clients can surface isError=true tool results as a generic
+    // INVALID_ARGUMENT and hide structuredContent. Keep recoverable executor
+    // failures as normal tool results with success=false plus text content.
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
@@ -4141,6 +4196,9 @@ fn extract_tool_result_structured_text(result: &Value) -> String {
 }
 
 fn remove_text_content_from_tool_result(req: &JsonRpcRequest, result: &mut Value) {
+    if tool_result_failed(result) {
+        return;
+    }
     let content_text = extract_tool_result_content_text(result);
     let Some(result_obj) = result.as_object_mut() else {
         return;
@@ -4640,10 +4698,7 @@ fn build_auto_widget_payload(
     widget_context: Option<&AutoWidgetContext>,
 ) -> Value {
     let tool_name = tool_name_from_request(req);
-    let is_error = result
-        .get("isError")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let is_error = tool_result_failed(result);
     match tool_name.as_str() {
         "search" => match build_search_text_widget_payload(result, is_error) {
             Some(payload) => payload,
@@ -5058,6 +5113,8 @@ async fn handle_repo_snapshot(req: &JsonRpcRequest, workspace_root: &str) -> Jso
         }
     };
 
+    let repo_root = cwd.to_string_lossy().into_owned();
+
     let git_commands = [
         "git status --short",
         "git branch --show-current",
@@ -5107,7 +5164,7 @@ async fn handle_repo_snapshot(req: &JsonRpcRequest, workspace_root: &str) -> Jso
     let read = if paths.is_empty() {
         json!({"fileCount":0,"bytes":0,"lineCount":0,"batchTruncated":false,"files":[]})
     } else {
-        match workspace_tools::read_files(workspace_root, &paths) {
+        match workspace_tools::read_files(&repo_root, &paths) {
             Ok(output) => json!({
                 "fileCount": output.files.len(),
                 "bytes": output.total_bytes,
@@ -5145,7 +5202,7 @@ async fn handle_repo_snapshot(req: &JsonRpcRequest, workspace_root: &str) -> Jso
                 );
             }
         };
-        match crate::bounded_search::search(workspace_root.to_owned(), request).await {
+        match crate::bounded_search::search(repo_root.clone(), request).await {
             Ok(value) => searches.push(value),
             Err(error) => return tool_error_response(req, error),
         }
@@ -6033,16 +6090,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_argument_validation_stays_mcp_error() {
+    async fn ssh_argument_validation_returns_model_visible_failure() {
         let request = tool_call_request("ssh_exec", json!({ "command": "echo ok" }));
         let response = handle_ssh_exec(&request).await;
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError")),
-            Some(&json!(true))
-        );
+        assert_soft_tool_failure(&response);
     }
 
     fn result_text(response: &JsonRpcResponse) -> &str {
@@ -6079,6 +6130,53 @@ mod tests {
             content.iter().all(|entry| entry.get("text").is_none()
                 && entry.get("type").and_then(Value::as_str) != Some("text")),
             "tool result content must not contain text entries: {content:?}"
+        );
+    }
+
+    fn assert_soft_tool_failure(response: &JsonRpcResponse) {
+        let result = response.result.as_ref().expect("missing result");
+        assert!(
+            tool_result_failed(result),
+            "tool failure must remain detectable from structuredContent: {result}"
+        );
+        assert!(
+            result.get("isError").is_none(),
+            "recoverable tool failures must not set MCP isError: {result}"
+        );
+        let content_text = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|entry| entry.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            !content_text.trim().is_empty(),
+            "tool failure must expose non-empty text content: {result}"
+        );
+    }
+
+    #[test]
+    fn tool_failure_uses_structured_stderr_as_text_content() {
+        let req = tool_call_request("run_command", json!({"command":"exit 7"}));
+        let response = tool_error_response_with_structured(
+            &req,
+            String::new(),
+            json!({
+                "toolName": "run_command",
+                "success": false,
+                "exitCode": 7,
+                "stderr": "synthetic command failure",
+            }),
+        );
+        assert_soft_tool_failure(&response);
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.pointer("/content/0/text"))
+                .and_then(Value::as_str),
+            Some("synthetic command failure")
         );
     }
 
@@ -6474,15 +6572,7 @@ mod tests {
                 &None,
             )
             .await;
-            assert_eq!(
-                response
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("isError"))
-                    .and_then(Value::as_bool),
-                Some(true),
-                "{tool_name} should be blocked in read-only mode"
-            );
+            assert_soft_tool_failure(&response);
             assert!(result_text(&response).contains("disabled in read-only mode"));
         }
 
@@ -6641,8 +6731,8 @@ mod tests {
     async fn run_script_executes_multiline_workspace_script_without_inline_payload() {
         let workspace_root =
             std::env::temp_dir().join(format!("catdesk-mcp-run-script-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace_root).expect("create workspace");
-        let script = workspace_root.join("payload.ps1");
+        std::fs::create_dir_all(workspace_root.join("scripts")).expect("create workspace");
+        let script = workspace_root.join("scripts/payload.ps1");
         std::fs::write(
             &script,
             "$x = 'quoted value';\nWrite-Output $x\nWrite-Output 'done'\n",
@@ -6652,6 +6742,7 @@ mod tests {
         let req = tool_call_request(
             "run_script",
             json!({
+                "cwd": "scripts",
                 "path": "payload.ps1",
                 "timeout": 10_000
             }),
@@ -6729,9 +6820,9 @@ mod tests {
     async fn repo_snapshot_combines_git_read_and_search_in_one_call() {
         let workspace_root =
             std::env::temp_dir().join(format!("catdesk-mcp-repo-snapshot-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(workspace_root.join("repo/src")).expect("create workspace");
         std::fs::write(
-            workspace_root.join("sample.txt"),
+            workspace_root.join("repo/src/sample.txt"),
             "alpha needle omega\nsecond line\n",
         )
         .expect("write sample");
@@ -6739,10 +6830,11 @@ mod tests {
         let req = tool_call_request(
             "repo_snapshot",
             json!({
-                "paths": ["sample.txt"],
+                "cwd": "repo",
+                "paths": ["src/sample.txt"],
                 "searches": [{
                     "pattern": "needle",
-                    "path": ".",
+                    "path": "src",
                     "fixed_strings": true,
                     "max_matches": 10
                 }]
@@ -6758,6 +6850,18 @@ mod tests {
         assert_eq!(
             structured.get("toolName").and_then(Value::as_str),
             Some("repo_snapshot")
+        );
+        assert_eq!(
+            structured
+                .pointer("/read/files/0/text")
+                .and_then(Value::as_str),
+            Some("alpha needle omega\nsecond line\n")
+        );
+        assert_eq!(
+            structured
+                .pointer("/searches/0/matchCount")
+                .and_then(Value::as_u64),
+            Some(1)
         );
         let _ = std::fs::remove_dir_all(workspace_root);
     }
@@ -6869,14 +6973,7 @@ mod tests {
             &None,
         )
         .await;
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_soft_tool_failure(&response);
         assert!(result_text(&response).contains("Use start_command"));
         let _ = std::fs::remove_dir_all(workspace_root);
     }
@@ -7525,15 +7622,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_soft_tool_failure(&response);
         assert_eq!(result_text(&response), "Missing required parameter: edits");
         assert_eq!(
             std::fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
@@ -7568,15 +7657,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_soft_tool_failure(&response);
         assert_eq!(
             result_text(&response),
             "Missing required parameter: pattern"
@@ -7611,15 +7692,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_soft_tool_failure(&response);
         assert_eq!(
             result_text(&response),
             "Parameter max_matches must be a non-negative integer"
@@ -7644,15 +7717,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_soft_tool_failure(&response);
         assert_eq!(
             result_text(&response),
             "max_matches must be between 1 and 500"
@@ -8169,15 +8234,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
+        assert_soft_tool_failure(&response);
         assert!(
             result_text(&response).contains("old_string matched 2 occurrences"),
             "unexpected result text: {}",
@@ -9070,14 +9127,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError")),
-            Some(&json!(true)),
-            "a batch where nothing was read is a failed call"
-        );
+        assert_soft_tool_failure(&response);
 
         let _ = std::fs::remove_dir_all(workspace_root);
     }
@@ -9085,7 +9135,7 @@ mod tests {
     #[tokio::test]
     async fn read_tool_rejects_argument_shapes_the_schema_forbids() {
         let workspace_root = read_workspace("bad-args");
-        for (label, args) in [
+        for (_label, args) in [
             ("not an array", json!({ "paths": "a.txt" })),
             ("not strings", json!({ "paths": [1] })),
             ("empty string", json!({ "paths": [""] })),
@@ -9107,14 +9157,7 @@ mod tests {
                 &None,
             )
             .await;
-            assert_eq!(
-                response
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("isError")),
-                Some(&json!(true)),
-                "{label} should be rejected"
-            );
+            assert_soft_tool_failure(&response);
         }
 
         let _ = std::fs::remove_dir_all(workspace_root);
